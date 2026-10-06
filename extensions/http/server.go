@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"gina"
+	gtls "gina/extensions/tls"
 )
 
 // Config configures a Server. Zero values take the documented defaults; for the
@@ -27,6 +28,10 @@ type Config struct {
 	ReadTimeout        time.Duration // whole request, from first byte (default 10s)
 	WriteTimeout       time.Duration // default 10s
 	MaxRequestsPerConn int           // 0 = unlimited
+
+	// TLS, when set, serves HTTPS: every connection runs a TLS 1.3 handshake first
+	// (see gina/extensions/tls for what is and is not supported).
+	TLS *gtls.Config
 
 	TypeIDBase gina.TypeID // isolate type ids TypeIDBase and TypeIDBase+1 (default 200)
 }
@@ -95,6 +100,11 @@ func (s *Server) Install(spec *gina.SystemSpec) error {
 	n := len(spec.Shards)
 	if n == 0 {
 		return errors.New("http: spec has no shards")
+	}
+	if s.cfg.TLS != nil {
+		if err := s.cfg.TLS.Validate(); err != nil {
+			return err
+		}
 	}
 	if n > 1 && !s.cfg.ReusePort {
 		return errors.New("http: more than one shard needs Config.ReusePort (each shard binds its own listener)")
@@ -174,7 +184,10 @@ func (s *Server) listenerHandler(l *listener, g *gina.Ctx, m *gina.Message) gina
 
 type connState struct {
 	fd         gina.FDHandle
-	rbuf, wbuf []byte
+	rbuf, wbuf []byte // plaintext: request bytes / response
+	cbuf       []byte // TLS only: ciphertext read buffer
+	tls        *gtls.Conn
+	tlsSent    int // TLS only: bytes of tls.Outgoing() in the send that is in flight
 	rlen       int
 	scanned    int
 	reqStart   uint64 // ns when the current request's first byte arrived; 0 when idle
@@ -206,6 +219,14 @@ func (s *Server) connInit(cs *connState, g *gina.Ctx, _ []byte) gina.Effect {
 	cs.fd = g.OwnedFD()
 	cs.rbuf = s.getBuf(s.cfg.ReadBufSize)
 	cs.wbuf = s.getBuf(1024)[:0]
+	if s.cfg.TLS != nil {
+		t, err := gtls.NewServer(s.cfg.TLS)
+		if err != nil {
+			g.CloseFD(cs.fd)
+			return gina.Crash(gina.FaultInitFailed)
+		}
+		cs.tls, cs.cbuf = t, s.getBuf(16<<10)
+	}
 	s.conns++
 	return s.recv(cs, g)
 }
@@ -214,7 +235,8 @@ func (s *Server) closeConn(cs *connState, g *gina.Ctx) gina.Effect {
 	g.CloseFD(cs.fd)
 	s.putBuf(cs.rbuf)
 	s.putBuf(cs.wbuf)
-	cs.rbuf, cs.wbuf = nil, nil
+	s.putBuf(cs.cbuf)
+	cs.rbuf, cs.wbuf, cs.cbuf, cs.tls = nil, nil, nil, nil
 	s.conns--
 	return gina.Done()
 }
@@ -226,20 +248,28 @@ func timeoutOr0(d time.Duration) time.Duration {
 	return d
 }
 
-// recv stages the next read: idle timeout between requests, remaining read
-// timeout for a request already in progress (so a slow drip cannot extend it).
+// recv stages the next read: the handshake deadline while a TLS handshake is in
+// progress, the idle timeout between requests, and the remaining read timeout
+// for a request already in progress (so a slow drip cannot extend it).
 func (s *Server) recv(cs *connState, g *gina.Ctx) gina.Effect {
 	timeout := timeoutOr0(s.cfg.IdleTimeout)
-	if cs.rlen > 0 && s.cfg.ReadTimeout > 0 {
+	switch {
+	case cs.tls != nil && !cs.tls.HandshakeComplete():
+		timeout = timeoutOr0(s.cfg.ReadTimeout)
+	case cs.rlen > 0 && s.cfg.ReadTimeout > 0:
 		rem := s.cfg.ReadTimeout - time.Duration(g.Now()-cs.reqStart)
 		if rem <= 0 {
 			return s.fail(cs, g, 408)
 		}
 		timeout = rem
-	} else if cs.rlen > 0 {
+	case cs.rlen > 0:
 		timeout = 0
 	}
-	g.IORecv(cs.fd, cs.rbuf[cs.rlen:], timeout)
+	if cs.tls != nil {
+		g.IORecv(cs.fd, cs.cbuf, timeout)
+	} else {
+		g.IORecv(cs.fd, cs.rbuf[cs.rlen:], timeout)
+	}
 	return gina.WaitIO()
 }
 
@@ -253,13 +283,33 @@ func (s *Server) connHandler(cs *connState, g *gina.Ctx, m *gina.Message) gina.E
 		if n <= 0 { // EOF, error, idle timeout or cancelled
 			return s.closeConn(cs, g)
 		}
+		if cs.tls != nil {
+			if err := cs.tls.Feed(cs.cbuf[:n]); err != nil {
+				cs.closeAfter = true // a fatal alert (if any) is queued: send it, then close
+				return s.flush(cs, g)
+			}
+			if cs.tls.OutLen() > 0 { // handshake flight or KeyUpdate answer
+				return s.flush(cs, g)
+			}
+			return s.process(cs, g)
+		}
 		if cs.rlen == 0 {
 			cs.reqStart = g.Now()
 		}
 		cs.rlen += int(n)
 		return s.process(cs, g)
 	case gina.TagIOSend:
-		if gina.PayloadAs[gina.IOResult](m).Result < 0 || cs.closeAfter || g.IsShuttingDown() {
+		if gina.PayloadAs[gina.IOResult](m).Result < 0 {
+			return s.closeConn(cs, g)
+		}
+		if cs.tls != nil {
+			cs.tls.ConsumeOut(cs.tlsSent)
+			cs.tlsSent = 0
+			if cs.tls.OutLen() > 0 {
+				return s.flush(cs, g)
+			}
+		}
+		if cs.closeAfter || g.IsShuttingDown() {
 			return s.closeConn(cs, g)
 		}
 		return s.process(cs, g)
@@ -269,29 +319,67 @@ func (s *Server) connHandler(cs *connState, g *gina.Ctx, m *gina.Message) gina.E
 	return gina.WaitIO()
 }
 
+// flush sends whatever TLS has queued; with nothing queued it carries on.
+func (s *Server) flush(cs *connState, g *gina.Ctx) gina.Effect {
+	out := cs.tls.Outgoing()
+	if len(out) == 0 {
+		if cs.closeAfter {
+			return s.closeConn(cs, g)
+		}
+		return s.process(cs, g)
+	}
+	cs.tlsSent = len(out)
+	g.IOSend(cs.fd, out, timeoutOr0(s.cfg.WriteTimeout))
+	return gina.WaitIO()
+}
+
+// pull moves decrypted TLS bytes into the request buffer.
+func (s *Server) pull(cs *connState, g *gina.Ctx) {
+	for cs.tls != nil && cs.tls.PlainLen() > 0 && cs.rlen < len(cs.rbuf) {
+		if cs.rlen == 0 {
+			cs.reqStart = g.Now()
+		}
+		cs.rlen += cs.tls.ReadPlain(cs.rbuf[cs.rlen:])
+	}
+}
+
 // process parses buffered bytes: answer a complete request, or ask for more.
 func (s *Server) process(cs *connState, g *gina.Ctx) gina.Effect {
-	if cs.rlen == 0 {
-		cs.reqStart = 0
-		return s.recv(cs, g)
-	}
-	st, consumed, need, status := parseRequest(cs.rbuf[:cs.rlen], cs.scanned, &s.lim, &cs.req, cs.hdrs[:0])
-	switch st {
-	case psMore:
+	var st parseState
+	var consumed, need, status int
+	for {
+		s.pull(cs, g)
+		if cs.rlen == 0 {
+			cs.reqStart = 0
+			if cs.tls != nil && cs.tls.PeerClosed() {
+				return s.closeConn(cs, g)
+			}
+			return s.recv(cs, g)
+		}
+		st, consumed, need, status = parseRequest(cs.rbuf[:cs.rlen], cs.scanned, &s.lim, &cs.req, cs.hdrs[:0])
+		if st != psMore {
+			break
+		}
 		if need == 0 { // headers still incomplete: next time resume the terminator search here
 			cs.scanned = cs.rlen
 		}
+		grew := false
 		if need > len(cs.rbuf) { // body bigger than the buffer: grow once to the exact size
-			cs.rbuf = grow(cs.rbuf, need)
+			cs.rbuf, grew = grow(cs.rbuf, need), true
 		} else if need == 0 && cs.rlen == len(cs.rbuf) { // headers fill the buffer: double it
-			cs.rbuf = grow(cs.rbuf, min(2*len(cs.rbuf), s.cfg.MaxHeaderBytes))
+			cs.rbuf, grew = grow(cs.rbuf, min(2*len(cs.rbuf), s.cfg.MaxHeaderBytes)), true
+		}
+		if grew && cs.tls != nil && cs.tls.PlainLen() > 0 {
+			continue // more decrypted bytes are already waiting
 		}
 		return s.recv(cs, g)
-	case psErr:
+	}
+	if st == psErr {
 		return s.fail(cs, g, status)
 	}
 	c := &cs.c
 	c.reset(g, &cs.req)
+	c.tls = cs.tls
 	s.dispatch(c)
 	cs.requests++
 	s.requests++
@@ -304,6 +392,20 @@ func (s *Server) process(cs *connState, g *gina.Ctx) gina.Effect {
 	cs.reqStart = 0
 	if cs.rlen > 0 {
 		cs.reqStart = g.Now()
+	}
+	return s.sendResponse(cs, g)
+}
+
+// sendResponse sends cs.wbuf, through TLS when enabled.
+func (s *Server) sendResponse(cs *connState, g *gina.Ctx) gina.Effect {
+	if cs.tls != nil {
+		if err := cs.tls.Write(cs.wbuf); err != nil {
+			return s.closeConn(cs, g)
+		}
+		if cs.closeAfter {
+			cs.tls.CloseNotify()
+		}
+		return s.flush(cs, g)
 	}
 	g.IOSend(cs.fd, cs.wbuf, timeoutOr0(s.cfg.WriteTimeout))
 	return gina.WaitIO()
@@ -336,8 +438,7 @@ func (s *Server) fail(cs *connState, g *gina.Ctx, code int) gina.Effect {
 	cs.closeAfter = true
 	cs.req.Method, cs.req.Minor = "GET", 1
 	s.buildResponse(cs, false)
-	g.IOSend(cs.fd, cs.wbuf, timeoutOr0(s.cfg.WriteTimeout))
-	return gina.WaitIO()
+	return s.sendResponse(cs, g)
 }
 
 const timeFormat = "Mon, 02 Jan 2006 15:04:05 GMT"

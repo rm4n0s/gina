@@ -28,6 +28,13 @@ func routes() *ghttp.Router {
 	r.POST("/echo", func(c *ghttp.Context) { c.Bytes(200, "application/octet-stream", c.Req.Body) })
 	r.GET("/boom", func(c *ghttp.Context) { var m map[string]int; m["x"] = 1 })
 	r.GET("/json", func(c *ghttp.Context) { c.JSON(200, `{"ok":true}`) })
+	r.GET("/tlsinfo", func(c *ghttp.Context) {
+		if i, ok := c.TLS(); ok {
+			c.String(200, "tls sni="+i.ServerName+" alpn="+i.ALPN+" cipher="+i.CipherName())
+		} else {
+			c.String(200, "plain")
+		}
+	})
 	r.GET("/shard", func(c *ghttp.Context) { c.String(200, strconv.Itoa(int(c.Gina().ShardID()))) })
 	return r
 }
@@ -183,6 +190,7 @@ func TestBasicRoutes(t *testing.T) {
 		{get("/hello/gina"), 200, "hello gina\n"},
 		{get("/q?name=a%20b"), 200, "a b"},
 		{get("/json"), 200, `{"ok":true}`},
+		{get("/tlsinfo"), 200, "plain"},
 		{get("/missing"), 404, "not found\n"},
 		{"POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n", 405, "method not allowed\n"},
 	} {

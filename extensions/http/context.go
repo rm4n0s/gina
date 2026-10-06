@@ -4,6 +4,7 @@ import (
 	"strconv"
 
 	"gina"
+	gtls "gina/extensions/tls"
 )
 
 // Context is a request/response pair handed to a Handler. It is reused for every
@@ -19,12 +20,39 @@ type Context struct {
 	hdr     []byte // extra response headers, "Name: value\r\n" each
 	body    []byte
 	close   bool
+	tls     *gtls.Conn
 }
 
 func (c *Context) reset(g *gina.Ctx, req *Request) {
-	c.Req, c.g, c.nparams = req, g, 0
+	c.Req, c.g, c.nparams, c.tls = req, g, 0, nil
 	c.status, c.ctype, c.close = 200, "", false
 	c.hdr, c.body = c.hdr[:0], c.body[:0]
+}
+
+// TLSInfo describes the TLS session a request arrived on.
+type TLSInfo struct {
+	ServerName  string // SNI the client asked for ("" if none)
+	ALPN        string // negotiated application protocol ("http/1.1")
+	CipherSuite uint16
+}
+
+// CipherName is the IANA name of the negotiated cipher suite.
+func (i TLSInfo) CipherName() string {
+	switch i.CipherSuite {
+	case gtls.TLS_AES_128_GCM_SHA256:
+		return "TLS_AES_128_GCM_SHA256"
+	case gtls.TLS_AES_256_GCM_SHA384:
+		return "TLS_AES_256_GCM_SHA384"
+	}
+	return "unknown"
+}
+
+// TLS returns the session details when the request came over HTTPS (always TLS 1.3).
+func (c *Context) TLS() (TLSInfo, bool) {
+	if c.tls == nil {
+		return TLSInfo{}, false
+	}
+	return TLSInfo{ServerName: c.tls.ServerName(), ALPN: c.tls.ALPN(), CipherSuite: c.tls.CipherSuite()}, true
 }
 
 // Gina exposes the isolate context, e.g. to message other isolates.

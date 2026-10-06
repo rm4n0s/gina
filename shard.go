@@ -94,6 +94,7 @@ type Shard struct {
 
 	ctx       Ctx
 	yieldMsg  Message
+	initArgs  [MaxInitArgs]byte
 	lastPanic any
 
 	tick        uint64
@@ -496,7 +497,8 @@ func (s *Shard) startIsolate(sp *SpawnSpec, parent Handle) (Handle, Effect, Spaw
 	t.state[slot] = stRunning
 	saved := s.ctx
 	s.ctx = Ctx{s: s, self: h, t: t, slot: slot}
-	eff := s.runInit(t, slot, sp.Args[:sp.ArgsSize])
+	n := copy(s.initArgs[:], sp.Args[:sp.ArgsSize]) // copied so the (escaping) init args don't pull *sp onto the heap
+	eff := s.runInit(t, slot, s.initArgs[:n])
 	staged := s.ctx.staged
 	s.ctx = saved
 	switch eff.Kind {

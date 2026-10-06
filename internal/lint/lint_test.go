@@ -1,6 +1,10 @@
 package lint
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestRules(t *testing.T) {
 	cases := []struct {
@@ -27,5 +31,29 @@ func TestRules(t *testing.T) {
 		if len(got) != c.want {
 			t.Errorf("%s: got %d findings %v, want %d", c.name, len(got), got, c.want)
 		}
+	}
+}
+
+func TestCheckDirSkipsNestedModulesButNotOtherDirs(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, src string) {
+		p := filepath.Join(root, rel)
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bad := "package p\nfunc f() { go g() }\nfunc g() {}\n"
+	write("go.mod", "module m\n")
+	write("a/ok.go", "package a\n")
+	write("bench/baseline/go.mod", "module baseline\n") // nested module: exempt
+	write("bench/baseline/main.go", bad)
+	write("pkg/bad.go", bad) // ordinary package: still checked
+	fs, err := CheckDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fs) != 1 || filepath.Base(fs[0].Pos.Filename) != "bad.go" {
+		t.Fatalf("findings = %v, want exactly pkg/bad.go", fs)
 	}
 }

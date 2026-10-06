@@ -613,3 +613,18 @@ func BenchmarkPingPongTwoShards(b *testing.B) {
 		sys.Step() // one round = each shard runs one turn = 2 messages delivered
 	}
 }
+
+// BenchmarkSpawnAndExit measures the full isolate lifecycle: spawn (init handler),
+// first message, Done, supervision bookkeeping and slot teardown.
+func BenchmarkSpawnAndExit(b *testing.B) {
+	h := func(self *sink, ctx *gina.Ctx, m *gina.Message) gina.Effect { return gina.Done() }
+	spec := gina.SystemSpec{Types: []gina.TypeDesc{gina.RegisterType(1, gina.TypeOptions{SlotCount: 4, MailboxCapacity: 4}, nil, h)}, Shards: make([]gina.ShardSpec, 1)}
+	sys, _ := gina.NewSystem(spec, gina.Options{Clock: &gina.SimClock{}})
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		hd, _ := sys.Spawn(0, gina.SpawnSpec{Type: 1, Group: gina.GroupNone})
+		sys.Send(hd, tagWork, nil)
+		sys.Step()
+	}
+}

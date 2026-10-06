@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -86,6 +87,13 @@ func CheckDir(root string) ([]Finding, error) {
 			name := d.Name()
 			if path != root && (name == "testdata" || name == "vendor" || strings.HasPrefix(name, ".")) {
 				return filepath.SkipDir
+			}
+			// A nested Go module is a separate program (e.g. bench/nethttp, a
+			// net/http comparison baseline) and is not part of Gina.
+			if path != root {
+				if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil {
+					return filepath.SkipDir
+				}
 			}
 			return nil
 		}

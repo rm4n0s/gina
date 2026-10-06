@@ -225,3 +225,17 @@ func TestParseRandomMutations(t *testing.T) {
 		t.Fatal("mutations did not exercise both outcomes")
 	}
 }
+
+func BenchmarkParseRequest(b *testing.B) {
+	raw := []byte("GET /hello/bench?x=1 HTTP/1.1\r\nHost: 127.0.0.1:8080\r\nUser-Agent: oha/1.0\r\nAccept: */*\r\nAccept-Encoding: gzip\r\nConnection: keep-alive\r\n\r\n")
+	req := &Request{}
+	hdrs := make([]Header, 0, 64)
+	lim := &limits{maxHeaderBytes: 16384, maxURI: 8192, maxBody: 1 << 20}
+	b.SetBytes(int64(len(raw)))
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if st, _, _, _ := parseRequest(raw, 0, lim, req, hdrs); st != psOK {
+			b.Fatal("parse failed")
+		}
+	}
+}
