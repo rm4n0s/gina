@@ -1,12 +1,12 @@
 # Benchmarks
 
-Measured 2026-10-06. Reproduce with `bench/run.sh` (about 10 minutes) and `bench/summarize.py bench/results.csv`; raw data is in [bench/results.csv](../bench/results.csv).
+Measured 2026-10-07. Reproduce with `bench/run.sh` (about 10 minutes for the full matrix) and `bench/summarize.py bench/results.csv`; raw data is in [bench/results.csv](../bench/results.csv), the figure is rebuilt by `python3 bench/plot.py`.
 
 **Read the caveats at the bottom before quoting any number.**
 
 ![Gina vs net/http: throughput, TLS handshakes, p99 latency, 64 KiB echo and memory](../bench/results.png)
 
-*Figure: regenerate with `python3 bench/plot.py` (reads `bench/results.csv`; a dark variant `results-dark.png` is produced too). The tables below are the table view of the same data.*
+*The tables below are the table view of the same data.*
 
 ## Setup
 
@@ -15,90 +15,92 @@ Measured 2026-10-06. Reproduce with `bench/run.sh` (about 10 minutes) and `bench
 | Machine | AMD Ryzen AI MAX+ 395, 16 cores / 32 threads (SMT), two core complexes, Linux 7.2, Go 1.26, CPU governor `powersave` |
 | Server | confined with `taskset` to physical cores `0..N-1` (SMT siblings left idle) |
 | Load generator | `oha` 1.16, confined to physical cores 8-15 (the other complex), so it never shares a core with the server |
-| Gina | `examples/httpserver`, **N worker processes** (`gina.Prefork`, one single-threaded shard each, `SO_REUSEPORT`); N=1 runs a single process |
+| **Gina** | `examples/httpserver -shards N -pin`: **one process, N shard threads** pinned to cores, one `SO_REUSEPORT` listener each, cross-shard rings. Tina's model |
 | Baseline | Go `net/http` (`bench/nethttp`, a separate module because it uses goroutines), `GOMAXPROCS=N`, same routes and bodies, HTTP/1.1 only, TLS 1.3 only, ECDSA P-256, session tickets disabled |
-| Both servers get | the same N cores. 256 concurrent connections (64 for the echo test), 1 s warm-up, then 3 runs of 5 s; the **median** run is reported |
-| Traffic | loopback, HTTP/1.1, `GET /hello/bench` (14-byte body); the TLS rows use `--insecure` against a self-signed certificate |
+| All servers get | the same N cores. 256 concurrent connections (64 for the echo test), 1 s warm-up, then 2 runs of 4 s; the **median** is reported |
+| Traffic | loopback, HTTP/1.1, `GET /hello/bench` (14-byte body); TLS rows use `--insecure` against a self-signed certificate |
 
-## Microbenchmarks (one core, `go test -bench`, 3 runs, spread under 1%)
+## Microbenchmarks (one core, `go test -bench`, 2 runs, spread under 2%)
 
 | Benchmark | Result |
 |---|---|
-| Cross-shard ping-pong (2 messages, 2 isolate turns) | 92 ns, **0 allocs** |
-| Isolate spawn + first message + exit + teardown | 52 ns, **0 allocs** |
-| HTTP request parse (6 headers) | 199 ns, 683 MB/s, **0 allocs** |
-| TLS server flight, ECDSA P-256 (X25519 key exchange, key schedule, sign) | 82 µs, 297 allocs |
-| TLS server flight, Ed25519 | 77 µs |
-| TLS server flight, RSA-2048 | 670 µs (8.2x ECDSA) |
-| TLS record layer, AES-128-GCM seal + open, 16 KiB | 4.3 µs, 3.8 GB/s |
-| TLS record layer, AES-256-GCM | 4.8 µs, 3.4 GB/s |
+| Cross-shard round, cooperative driver (2 messages, atomic rings) | 111 ns, **0 allocs** (92 ns before the rings used atomics) |
+| Cross-**thread** hop, two pinned shard threads, default idle spin (`examples/pingpong`) | **0.16 µs** per hop (6.2M hops/s); 0.21 µs unpinned |
+| Cross-thread hop when every hop must sleep and be woken through the eventfd (`SpinFor < 0`) | 2.0 µs |
+| Isolate spawn + message + exit | 52 ns, **0 allocs** |
+| HTTP request parse (6 headers) | 193 ns, 700 MB/s, **0 allocs** |
+| TLS server flight, ECDSA P-256 / Ed25519 / RSA-2048 | 81 µs / 76 µs / 663 µs |
+| TLS record layer, AES-128-GCM / AES-256-GCM, 16 KiB seal + open | 3.8 GB/s / 3.5 GB/s |
 
-The spawn benchmark found a real allocation (the init-args slice escaped and dragged the whole spawn spec to the heap); it was fixed (85 ns, 1 alloc before).
+Benchmarks have already paid for themselves twice: one found a hidden allocation per spawn (fixed), another showed that the first cross-thread numbers were really measuring a 5 s shutdown grace period, not the hops.
 
 ## Gina vs net/http
 
 #### Keep-alive GET (14-byte response) - HTTP
 
-| cores | Gina req/s | net/http req/s | Gina / net/http | Gina p50 / p99 (ms) | net/http p50 / p99 (ms) | Gina RSS | net/http RSS | failed (G / N) |
-|---:|---:|---:|---:|---|---|---:|---:|---|
-| 1 | 168,339 | 111,225 | 1.51x | 1.50 / 1.64 | 2.27 / 4.61 | 11 MB | 17 MB | 0 / 0 |
-| 2 | 368,915 | 199,446 | 1.85x | 0.69 / 0.80 | 1.19 / 4.24 | 24 MB | 17 MB | 0 / 0 |
-| 4 | 715,690 | 392,427 | 1.82x | 0.35 / 0.49 | 0.56 / 2.50 | 40 MB | 17 MB | 0 / 0 |
-| 8 | 1,225,828 | 670,246 | 1.83x | 0.20 / 0.36 | 0.28 / 1.87 | 73 MB | 18 MB | 0 / 0 |
+| cores | Gina req/s | net/http req/s | Gina / net/http | p99 ms (Gina / net/http) | RSS MB (Gina / net/http) |
+|---:|---:|---:|---:|---|---|
+| 1 | 171,934 | 110,136 | 1.56x | 1.78 / 4.65 | 10 / 17 |
+| 2 | 367,016 | 194,432 | 1.89x | 0.87 / 4.38 | 12 / 18 |
+| 4 | 695,561 | 392,882 | 1.77x | 0.48 / 2.47 | 15 / 16 |
+| 8 | 1,211,112 | 643,714 | 1.88x | 0.35 / 1.95 | 21 / 19 |
 
 #### Keep-alive GET (14-byte response) - HTTPS (TLS 1.3)
 
-| cores | Gina req/s | net/http req/s | Gina / net/http | Gina p50 / p99 (ms) | net/http p50 / p99 (ms) | Gina RSS | net/http RSS | failed (G / N) |
-|---:|---:|---:|---:|---|---|---:|---:|---|
-| 1 | 153,252 | 102,230 | 1.50x | 1.63 / 2.22 | 2.45 / 4.76 | 33 MB | 22 MB | 0 / 0 |
-| 2 | 325,587 | 181,767 | 1.79x | 0.78 / 1.07 | 1.29 / 5.37 | 60 MB | 23 MB | 0 / 0 |
-| 4 | 591,223 | 385,705 | 1.53x | 0.41 / 0.69 | 0.59 / 2.38 | 90 MB | 24 MB | 0 / 0 |
-| 8 | 997,396 | 658,048 | 1.52x | 0.25 / 0.45 | 0.30 / 1.77 | 158 MB | 21 MB | 0 / 0 |
+| cores | Gina req/s | net/http req/s | Gina / net/http | p99 ms (Gina / net/http) | RSS MB (Gina / net/http) |
+|---:|---:|---:|---:|---|---|
+| 1 | 152,642 | 97,409 | 1.57x | 1.99 / 5.13 | 26 / 22 |
+| 2 | 328,616 | 177,526 | 1.85x | 0.95 / 5.41 | 39 / 23 |
+| 4 | 624,862 | 364,238 | 1.72x | 0.54 / 2.52 | 52 / 24 |
+| 8 | 1,060,734 | 618,704 | 1.71x | 0.41 / 1.88 | 76 / 25 |
 
 #### New connection per request (connection setup / TLS handshake bound) - HTTP
 
-| cores | Gina req/s | net/http req/s | Gina / net/http | Gina p50 / p99 (ms) | net/http p50 / p99 (ms) | Gina RSS | net/http RSS | failed (G / N) |
-|---:|---:|---:|---:|---|---|---:|---:|---|
-| 1 | 52,802 | 45,310 | 1.17x | 4.26 / 11.87 | 5.62 / 8.92 | 18 MB | 13 MB | 0 / 0 |
-| 2 | 75,370 | 81,738 | 0.92x | 3.04 / 10.19 | 3.02 / 7.80 | 37 MB | 15 MB | 0 / 0 |
-| 4 | 218,802 | 144,896 | 1.51x | 0.82 / 4.13 | 1.62 / 4.95 | 73 MB | 15 MB | 0 / 0 |
-| 8 | 257,171 | 140,876 | 1.83x | 0.88 / 3.17 | 1.71 / 3.52 | 131 MB | 17 MB | 0 / 0 |
+| cores | Gina req/s | net/http req/s | Gina / net/http | p99 ms (Gina / net/http) | RSS MB (Gina / net/http) |
+|---:|---:|---:|---:|---|---|
+| 1 | 47,396 | 46,907 | 1.01x | 12.46 / 10.07 | 14 / 14 |
+| 2 | 79,282 | 86,878 | 0.91x | 8.65 / 8.19 | 20 / 15 |
+| 4 | 214,118 | 128,844 | 1.66x | 4.55 / 5.08 | 34 / 16 |
+| 8 | 283,410 | 141,886 | 2.00x | 1.65 / 3.38 | 46 / 17 |
 
 #### New connection per request (connection setup / TLS handshake bound) - HTTPS (TLS 1.3)
 
-| cores | Gina req/s | net/http req/s | Gina / net/http | Gina p50 / p99 (ms) | net/http p50 / p99 (ms) | Gina RSS | net/http RSS | failed (G / N) |
-|---:|---:|---:|---:|---|---|---:|---:|---|
-| 1 | 8,551 | 5,281 | 1.62x | 29.79 / 32.89 | 46.53 / 107.31 | 34 MB | 20 MB | 0 / 0 |
-| 2 | 16,590 | 9,472 | 1.75x | 15.99 / 32.84 | 25.85 / 68.38 | 54 MB | 15 MB | 0 / 0 |
-| 4 | 29,195 | 14,590 | 2.00x | 7.62 / 27.15 | 17.08 / 55.57 | 86 MB | 16 MB | 0 / 0 |
-| 8 | 48,356 | 18,124 | 2.67x | 4.04 / 18.89 | 15.45 / 39.81 | 161 MB | 17 MB | 0 / 0 |
+| cores | Gina req/s | net/http req/s | Gina / net/http | p99 ms (Gina / net/http) | RSS MB (Gina / net/http) |
+|---:|---:|---:|---:|---|---|
+| 1 | 8,720 | 5,196 | 1.68x | 30.70 / 122.04 | 32 / 18 |
+| 2 | 16,609 | 9,314 | 1.78x | 32.12 / 64.55 | 39 / 16 |
+| 4 | 31,021 | 13,912 | 2.23x | 28.23 / 57.20 | 61 / 16 |
+| 8 | 50,350 | 17,426 | 2.89x | 17.46 / 45.66 | 111 / 18 |
 
 #### POST /echo with a 64 KiB body, keep-alive - HTTP
 
-| cores | Gina req/s | net/http req/s | Gina / net/http | Gina p50 / p99 (ms) | net/http p50 / p99 (ms) | Gina RSS | net/http RSS | failed (G / N) |
-|---:|---:|---:|---:|---|---|---:|---:|---|
-| 4 | 185,454 | 48,568 | 3.82x | 0.34 / 0.53 | 0.30 / 6.19 | 78 MB | 17 MB | 0 / 0 |
+| cores | Gina req/s | net/http req/s | Gina / net/http | p99 ms (Gina / net/http) | RSS MB (Gina / net/http) |
+|---:|---:|---:|---:|---|---|
+| 4 | 215,599 | 53,806 | 4.01x | 0.44 / 5.80 | 34 / 18 |
 
 #### POST /echo with a 64 KiB body, keep-alive - HTTPS (TLS 1.3)
 
-| cores | Gina req/s | net/http req/s | Gina / net/http | Gina p50 / p99 (ms) | net/http p50 / p99 (ms) | Gina RSS | net/http RSS | failed (G / N) |
-|---:|---:|---:|---:|---|---|---:|---:|---|
-| 4 | 74,192 | 39,140 | 1.90x | 0.83 / 1.27 | 0.33 / 8.66 | 111 MB | 18 MB | 0 / 0 |
+| cores | Gina req/s | net/http req/s | Gina / net/http | p99 ms (Gina / net/http) | RSS MB (Gina / net/http) |
+|---:|---:|---:|---:|---|---|
+| 4 | 81,111 | 37,475 | 2.16x | 1.06 / 8.91 | 68 / 20 |
 
-Memory is RSS summed over all server processes at the end of the run.
+Failed requests across all 72 measured runs: 0
+
+Memory is the resident memory of the server process at the end of the run.
 
 ## What the numbers say
 
-- **Keep-alive throughput: Gina is about 1.5-1.85x net/http** at every core count, HTTP and HTTPS, and scales almost linearly (168k to 1.23M req/s from 1 to 8 cores) because each core runs an independent process. Gina's **p99 is 3-6x lower** (for example 0.36 ms vs 1.87 ms at 8 cores) since a shard never contends for a scheduler or locks.
-- **Large bodies:** a 64 KiB echo is **3.8x** faster on plain HTTP and **1.9x** over TLS, with a far better p99. net/http's p50 is slightly lower; its tail is not.
-- **TLS handshakes** (new connection per request): Gina completes **1.6-2.7x** as many as net/http, about 8.5k/s per core and 48k/s on 8 cores. This is almost entirely ECDSA signing plus key exchange (82 µs measured above); the ratio grows with cores because net/http stops scaling around 18k/s here.
-- **Plain connection setup:** roughly on par (0.9-1.8x) and **noisy**: Gina's run-to-run spread reached 1.35x. This workload is dominated by the kernel's accept/SYN path, and Gina's listener accepts one connection per scheduler tick per shard, a known limit that a batching accept loop would remove.
-- **Memory: Gina uses more.** An idle Gina worker is about 7 MB (its own Go runtime and heap), so 8 workers cost about 56 MB before any traffic; under load it reached 73 MB (HTTP) and 158 MB (HTTPS) against about 18-25 MB for net/http. This is inherent to process-per-core; `MaxConns` sizing is not the cause (idle RSS is 6-7 MB at 256 or 4096). Choose fewer, busier workers if memory matters.
+- **Memory:** versus net/http, Gina is about equal on plain HTTP (21 vs 19 MB at 8 cores) and about 3x on HTTPS (76 vs 25 MB; TLS connections hold a 16 KiB read buffer each plus handshake garbage). All shard threads share one Go heap, so memory grows slowly with cores (10 MB on 1 core, 21 MB on 8).
+- **Versus net/http, keep-alive throughput is 1.6-1.9x** at every core count, over HTTP and HTTPS, and scales almost linearly (172k to 1.21M req/s from 1 to 8 cores). **p99 is 2.6-5.6x lower** (0.35 ms vs 1.95 ms at 8 cores).
+- **TLS handshakes:** 1.7-2.9x as many as net/http, about 8.7k/s per core and 50k/s on 8 cores. This is mostly ECDSA signing plus key exchange (81 µs measured above); net/http stops scaling near 17k/s here.
+- **Large bodies:** a 64 KiB echo is **4.0x** faster over HTTP and **2.2x** over TLS, with a far better p99 (0.37 ms vs 5.8 ms over HTTP).
+- **Plain connection setup:** roughly on par and **noisy** (up to 1.22x run-to-run). This workload is dominated by the kernel's accept/SYN path, and Gina's listener accepts one connection per scheduler tick per shard, a known limit.
+- **The shared garbage collector did not show up.** In thread mode all shards share one heap and collector, so a collection pauses every shard, but p99 stayed low in these runs (0.35 ms at 8 cores). That is a weak test (tiny responses, little live data, no allocation-heavy handlers); see the caveats.
 
 ## Caveats
 
 - **Not a feature-equal comparison.** `net/http` is a hardened, complete server (chunked bodies, `Expect: 100-continue`, HTTP/2 elsewhere, years of edge-case fixes). Gina's HTTP is deliberately minimal: no chunked request bodies, no HTTP/2, a hand-written parser and a TLS 1.3 implementation that has had no security audit and lacks resumption and ChaCha20. Some of the speed is the missing generality.
-- **Different concurrency models.** Gina uses N shared-nothing processes (no shared cache or state between workers); `net/http` is one process with a goroutine per connection. Equal cores, not equal architecture.
-- **Short, single-machine, loopback runs.** Three 5-second runs per configuration on one box with the load generator on the same machine. Run-to-run spread was a median of 2.5% (worst 1.35x on connection-setup rows). The `net/http` TLS rows were re-measured about 15 minutes after the Gina rows (to disable session tickets) and keep-alive numbers drifted by about 10% between sessions, so treat ratios as +/-10-15%.
+- **Different concurrency models.** Gina's shards never share isolate state and talk through rings; `net/http` is one multi-threaded runtime with a goroutine per connection. Equal cores, not equal architecture.
+- **Short, single-machine, loopback runs.** Two 4-second runs per configuration (the first dataset used three 5-second runs). Across 54 configurations the run-to-run spread had a median of 0.8% and a worst case of 1.22x (plain connection setup); other scenarios stayed within 4%. The CPU governor was `powersave` and not controlled, so absolute numbers will differ on other machines.
 - **The load generator is near, not at, its limit.** At 1.2M req/s `oha` used about 9 of its 16 threads, so the highest Gina rows may be slightly client-limited (a lower bound).
-- **One workload.** Tiny responses, 256 connections, ECDSA certificates, no application work in the handler, no real network. CPU frequency scaling was not controlled (`powersave` governor).
+- **One workload.** Tiny responses, 256 connections, ECDSA certificates, no application work in the handler, no real network, small live heap. The shared-GC comparison in particular needs a handler that allocates and a larger heap before it says anything about GC pauses under thread mode.

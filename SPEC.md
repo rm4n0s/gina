@@ -1,6 +1,6 @@
 # Gina — Specification for a Go Port of Tina
 
-Status: draft v0.3 (design, plus an implementation-status snapshot below) · Date: 2026-10-06 · Upstream: https://github.com/pmbanugo/tina (Odin, Apache-2.0)
+Status: draft v0.4 (design, plus an implementation-status snapshot below) · Date: 2026-10-07 · Upstream: https://github.com/pmbanugo/tina (Odin, Apache-2.0)
 
 "Gina" is the name of the Go port; the Go module path is the placeholder `gina`.
 
@@ -10,82 +10,93 @@ This spec is derived from upstream's README, `docs/concepts/*`, `docs/reference/
 
 Upstream is Apache-2.0. Reimplementing from documented behaviour is fine. Copying or transliterating source requires keeping the license and NOTICE and marking changes.
 
-## Implementation status (2026-10-06)
+## Implementation status (2026-10-07)
 
-Gina is a working prototype of the Tina model in Go with **no goroutines and no channels**, plus an HTTP/1.1 + TLS 1.3 server built on it. It is about 5,800 lines of Go (examples and the benchmark baseline included) plus 2,300 lines of tests: **63 passing tests, 5 benchmarks**, and a linter that enforces the no-goroutine rule on the whole repo. The engine runs all shards of a `System` cooperatively on **one thread**; multi-core comes from running several independent processes (`gina.Prefork`), not from the shared-memory process-per-shard runtime this spec describes in §3 and §7. Linux is the only platform with I/O (other platforms build, without sockets).
+Gina is a working Tina-style runtime in Go, plus an HTTP/1.1 + TLS 1.3 server built on it. It is about 6,300 lines of Go (examples and the benchmark baseline included) plus 2,900 lines of tests: **73 passing tests, 5 benchmarks**. Concurrency is confined to the thread host by convention.
+
+**Architecture as built: thread per core, like Tina.** Each shard is a goroutine locked to its own OS thread (optionally pinned to a core) that owns its isolates, message pool, timers and sockets. Shards exchange 128-byte messages through lock-free SPSC rings in the shared address space (atomic cursors, one publish per tick, one commit per drain). An idle shard spins briefly, then sleeps in its own `epoll`; a peer that publishes into one of its rings wakes it through an `eventfd`. Goroutines and other concurrency primitives are **confined by convention to one file** (`threads.go`, the thread host) and the tests; the rest of the engine is single-threaded per shard (§2). A single-thread cooperative driver (`System.Step`) remains for the deterministic simulator and unit tests.
+
+Linux is the only platform with I/O (other platforms build, without sockets).
 
 ### What exists
 
-- **Engine** (package `gina`): isolates returning effects (`Done`, `Yield`, `WaitMessage`, `WaitIO`, `Crash`); typed chunked slab storage with generational 28-bit handles; the fixed 128-byte `Message` (size asserted at compile time) with pointer-free, padding-free payload validation; bounded mailboxes; a message pool with a protected system reserve; N×(N-1) staged/published rings between shards; indexed timer heap with cancel; spawn with args; same-shard attachments (`SendAttach`); ordered shutdown; structural invariant checks.
+- **Engine** (package `gina`): isolates returning effects (`Done`, `Yield`, `WaitMessage`, `WaitIO`, `Crash`); typed chunked slab storage with generational 28-bit handles; the fixed 128-byte `Message` (size asserted at compile time) with pointer-free, padding-free payload validation (cached lock-free); bounded mailboxes; a message pool with a protected system reserve; indexed timer heap with cancel; spawn with args; same-shard attachments (`SendAttach`); ordered shutdown; structural invariant checks.
+- **Threaded runtime** (`System.Start/Run/Wait/Stop`, `Ctx.StopSystem`, `RunOptions{Pin, CPUBase, ShutdownGrace, SpinFor}`): one locked thread per shard; N×(N-1) Tina-style SPSC rings (producer and consumer cursors on separate cache-line pairs with cached copies of each other's cursor); wake-up protocol (announce sleep, re-check rings, block; senders publish, then check the flag) with sequentially consistent atomics; per-shard `epoll` + `eventfd`; idle spin before sleeping; graceful stop (`TagShutdown`, then force-free after the grace period); per-goroutine `SetPanicOnFault` so faults in handlers stay contained.
 - **Supervision:** one-for-one, one-for-all, rest-for-one; permanent/transient/temporary; sliding restart budget; `TagChildExit` to the spawning isolate; Level-2 shard reset; quarantine and revive; a trap boundary (`recover` + `SetPanicOnFault`) that turns a handler panic or fault into a crash of that isolate only.
-- **Simulator:** seeded PRNG tree (SplitMix64 + xoshiro256**, known-answer tested), simulated clock, shuffled shard order, fault injection (message drop, handler crash, partitions), per-round invariant checks, FNV trace hash. Same seed gives the same hash (tested across 30 seeds with faults).
-- **I/O:** edge-triggered epoll reactor presented with completion semantics (`ctx.Listen` with optional `SO_REUSEPORT`, `IOAccept`/`IORecv`/`IOSend` + `WaitIO()`, per-operation timeouts, cancellation when an isolate dies or shutdown starts, sockets owned by isolates and closed when the owner dies).
-- **Multi-core:** `gina.Prefork(n, opts)` re-executes the binary n times (no goroutines, `wait4` supervision, restart budget, `PDEATHSIG`); with `ReusePort` every worker binds the same port and the kernel balances connections.
-- **`extensions/http`:** HTTP/1.1 server on isolates (listener per shard, isolate per connection): allocation-free strict parser, router, response context, idle/read/write timeouts, connection shedding, graceful shutdown, `Context.TLS()`.
+- **Simulator** (cooperative driver): seeded PRNG tree (SplitMix64 + xoshiro256**, known-answer tested), simulated clock, shuffled shard order, fault injection (message drop, handler crash, partitions), per-round invariant checks, FNV trace hash. Same seed gives the same hash (tested across 30 seeds with faults). Threaded runs are *not* deterministic.
+- **I/O:** edge-triggered epoll reactor presented with completion semantics (`ctx.Listen` with optional `SO_REUSEPORT`, `IOAccept`/`IORecv`/`IOSend` + `WaitIO()`, per-operation timeouts, cancellation when an isolate dies or shutdown starts, sockets owned by isolates and closed when the owner dies). One reactor (epoll instance) per shard.
+- **`extensions/http`:** HTTP/1.1 server on isolates (listener per shard, isolate per connection): allocation-free strict parser, router, response context, idle/read/write timeouts, connection shedding, graceful shutdown, `Context.TLS()`, Server-Sent Events (`Context.EventStream`, `SendEvent`: any isolate on any shard pushes to an open stream). Server state is **per shard** (counters, buffer pool, date cache) so shard threads never share it.
 - **`extensions/tls`:** sans-I/O **TLS 1.3 server** written for Gina (stdlib `crypto/tls` needs a blocking connection and a goroutine per connection, and its QUIC mode rejects TCP clients), on stdlib primitives. See "Verification" for what is and is not proven.
-- **Tooling:** `cmd/ginalint`; `bench/` (reproducible comparison against `net/http`, results, charts); `docs/BENCHMARKS.md`; examples `pingpong`, `supervised`, `httpserver`, `https`.
+- **Tooling:** `bench/` (reproducible comparison against `net/http`, results, charts); `docs/BENCHMARKS.md`; examples `pingpong`, `supervised`, `shards`, `httpserver`, `https`, `sse`.
 
 ### Status against this spec
 
 | Spec | Status | Notes |
 |---|---|---|
-| §2 no goroutines/channels | **Done, enforcement narrower than specified** | `ginalint` is syntactic: `go`, channel types/send/receive, `select`, denylisted imports, `time.After/AfterFunc/Tick/NewTimer/NewTicker`, `t.Parallel`, `sync.WaitGroup`. It runs as a test over the repo; nested Go modules are exempt (`bench/nethttp`). **Not built:** `go/types` checks, `go list -deps`, the determinism rules (map iteration, `time.Now`, `math/rand`, finalizers), `-sim`, `//gina:mustcheck`. |
-| §3 architecture | **Changed** | Prefork processes instead of shared-memory process-per-shard (see deviations). |
+| §2 where concurrency is allowed | **Done** | Rule relaxed on 2026-10-07: concurrency lives in `threads.go` and the tests, by convention (a lint tool existed and was removed). |
+| §3 architecture | **Done** | Thread per core with in-process rings, as Tina. |
 | §4.1 isolates and effects | **Done (subset)** | No `WaitReply`/`WaitIOOrCrash`; `TypeOptions` has no `BudgetWeight`. |
 | §4.2 messages, handles, tags | **Done** | Tag values are ours; `TagIOAccept/Recv/Send`, `TagChildExit` added. |
-| §4.3 `Ctx` | **Partial** | Done: `SendRaw`, `Send[P]`, `SendAttach`, `Spawn`, `RegisterTimer` (+`CancelTimer`), `Listen`, `IOAccept/IORecv/IOSend`, `CloseFD`, `OwnedFD`, `LocalPort`, `IsShuttingDown`, `ShardID`, `Now`. **Missing:** `Call`/`Reply`, logging, `KeyToShard`, `IPv4/IPv6` helpers, socket option/bind/shutdown calls, `IOWrite`/`IOSendTo`/`IOSendFile`, staged send buffers, `SupervisionGroupID`/`TypeConfig`. |
-| §4.4 boot and `SystemSpec` | **Partial** | `NewSystem` validates (power-of-two sizes, id and slot limits, ring size, group ids). Added `MaxFDs`, `ResetMax`, `ResetWindow`. **Missing:** `GCConfig`, `ShardMemoryLimit`, `Mode`, `QuarantinePolicy`, `InitTimeout`/`ShutdownTimeout`. |
-| §5 memory and GC | **Partial** | Done: no arenas, slab zeroing on teardown, attachments, pointer-free payloads. **Missing:** GC policies, memory limit and pressure shedding, `Development` poisoning, per-type live-bytes stats. |
-| §6 execution engine | **Done (subset)** | Tick phases: inbound, I/O events, timers, dispatch, publish. FIFO ready queue (no per-type batching), no log phase, no idle spin or `timerfd` (idle blocks in `epoll_wait` with a millisecond timeout). |
-| §7.1-7.2 shared region, eventfd wake-ups | **Not built** | Rings are in-process. |
-| §7.3 reactor | **Partial** | epoll only. io_uring, `SCM_RIGHTS` fd handoff between processes, reactor-owned slots: not built (`HandoffFD` here means *ownership transfer to an isolate*). |
-| §8 supervision | **Mostly done** | Flat groups (no tree); budget exhaustion goes straight to a Level-2 reset. Level 3 is only Prefork's parent respawning a dead worker. No watchdog, no `ginactl`; graceful shutdown is `System.Shutdown`, not signal-driven (SIGTERM exits immediately). |
-| §9 simulation | **Mostly done** | Missing: message delay/duplication/reorder, timer skew, user-registered checkers, generation-monotonicity and fairness checkers, `GINA_SEED` (the seed is a parameter and is printed on failure). |
-| §10 quality gates | **Partial** | Present: unit, layout, simulation, engine alloc-free (`Step`, parser), rule lint, HTTP/TLS integration. **Missing:** GC soak, escape-analysis diff, automated multi-process tests (Prefork kill/respawn was verified by hand), long seed sweeps. |
+| §4.3 `Ctx` | **Partial** | Done: `SendRaw`, `Send[P]`, `SendAttach`, `Spawn`, `RegisterTimer` (+`CancelTimer`), `StopSystem`, `Listen`, `IOAccept/IORecv/IOSend`, `CloseFD`, `OwnedFD`, `LocalPort`, `IsShuttingDown`, `ShardID`, `Now`. **Missing:** `Call`/`Reply`, logging, `KeyToShard`, `IPv4/IPv6` helpers, socket option/bind/shutdown calls, `IOWrite`/`IOSendTo`/`IOSendFile`, staged send buffers, `SupervisionGroupID`/`TypeConfig`. |
+| §4.4 boot and `SystemSpec` | **Partial** | `NewSystem` validates (power-of-two sizes, id and slot limits, ring size, group ids); `Start/Run` host the shards. Added `MaxFDs`, `ResetMax`, `ResetWindow`. **Missing:** `GCConfig`, `ShardMemoryLimit`, `Mode`, `QuarantinePolicy`, `InitTimeout`. |
+| §5 memory and GC | **Partial** | Done: no arenas, slab zeroing on teardown, attachments, pointer-free payloads. **Missing:** GC policies, memory limit and pressure shedding, `Development` poisoning. In thread mode **all shards share one heap and one collector** (a GC pause stops every shard). |
+| §6 execution engine | **Done (subset)** | Tick phases: socket events, inbound, timers, dispatch, publish+wake. FIFO ready queue (no per-type batching), no log phase. Idle: spin, then block in the shard's own `epoll_wait` with a millisecond timer timeout. |
+| §7.1-7.2 rings and wake-ups | **Done, in-process** | Atomic SPSC rings + eventfd wake-ups between shard threads. A shared-memory (`memfd`) variant for cross-process messaging is **not built** and no longer needed for the default design. |
+| §7.3 reactor | **Partial** | epoll only. io_uring, fd handoff between shards, reactor-owned slots: not built (`HandoffFD` means *ownership transfer to an isolate*). |
+| §8 supervision | **Mostly done** | Flat groups (no tree); budget exhaustion goes straight to a Level-2 reset. **No watchdog** (a handler stuck in a loop blocks its shard thread), no `ginactl`. `System.Stop` is the graceful shutdown; SIGTERM still exits immediately (a signal bridge is now permitted in a marked file but not built). |
+| §9 simulation | **Mostly done** | Missing: message delay/duplication/reorder, timer skew, user-registered checkers, generation-monotonicity and fairness checkers, `GINA_SEED`. |
+| §10 quality gates | **Partial** | Present: unit, layout, simulation, engine alloc-free, HTTP/TLS integration, **threaded runtime under `-race` (repeated)**. **Missing:** GC soak, escape-analysis diff, long seed sweeps. |
 | §11 layout | **Simplified** | The engine is one package, not the planned `internal/*` split (see "As-built layout"). |
 
 ### Deviations from the sections below (deliberate)
 
 | Spec | As built |
 |---|---|
-| §3, §7, §8.2 L3: process per shard, shm rings, launcher, watchdog | Shards in a `System` share one thread. `gina.Prefork` gives multi-core with independent shared-nothing processes that **cannot message each other**. |
+| (original plan) process per shard, `memfd` rings, launcher, watchdog | Replaced by the thread-per-core design once goroutines were allowed (Tina's own model). Multi-process deployment (a former `gina.Prefork`) was built and then removed: workers shared no memory and could not message each other, which defeats the model. |
 | §7.3 reactor-owned I/O slots | Buffers belong to the isolate (`ctx.IORecv(fd, buf)`); the GC keeps them alive while an operation is in flight. A completion is pushed to the *front* of the mailbox (one spare mailbox slot guarantees room) and carries a byte count or `-errno`. |
 | §6.1 timer wheel | Indexed binary heap with O(log n) cancel; deterministic tie-break by registration order; I/O timeouts complete operations with `-ETIMEDOUT`. |
 | §6.1 batching by type | Plain FIFO ready queue. |
 | §8.1 group tree | Flat groups. |
 | §4.3 `SendResult` | Adds `RingFull`, `PayloadTooLarge`; `SpawnError` adds `BadFD`. |
 | Handles after a Level-2 reset | `System.BootHandle` returns the current handle of boot isolate *i*. |
-| (not in the original plan) | HTTP and TLS extensions; `Prefork`; `bench/`. TLS is implemented from the protocol because the stdlib cannot run inside an isolate. |
+| Thread-mode GC | One shared heap and collector (Tina has no GC). |
+| (not in the original plan) | HTTP and TLS extensions; idle spin; `bench/`. TLS is implemented from the protocol because the stdlib cannot run inside an isolate. |
 
 ### Measured results (details and caveats: `docs/BENCHMARKS.md`)
 
 | Microbenchmark (one core) | Result |
 |---|---|
-| Cross-shard ping-pong round (2 messages) | 92 ns, 0 allocs |
-| Isolate spawn + message + exit | 52 ns, 0 allocs (an init-args escape was found and fixed by the benchmark) |
-| HTTP request parse | 199 ns, 0 allocs |
-| TLS server flight: ECDSA P-256 / Ed25519 / RSA-2048 | 82 µs / 77 µs / 670 µs |
-| TLS record layer, AES-128-GCM / AES-256-GCM | 3.8 GB/s / 3.4 GB/s |
+| Cross-shard round on the cooperative driver (2 messages, atomic rings) | 111 ns, 0 allocs |
+| Cross-**thread** hop, two pinned shard threads, idle spin | 0.16 µs (6.2M hops/s); 0.21 µs unpinned; 2.0 µs when every hop must sleep and be woken via the eventfd |
+| Isolate spawn + message + exit | 52 ns, 0 allocs |
+| HTTP request parse | 193 ns, 0 allocs |
+| TLS server flight: ECDSA P-256 / Ed25519 / RSA-2048 | 81 µs / 76 µs / 663 µs |
+| TLS record layer, AES-128-GCM / AES-256-GCM | 3.8 GB/s / 3.5 GB/s |
 
-Against Go `net/http` on the same cores (1 to 8, loopback, 256 connections, Gina as N worker processes): **1.5-1.85x** keep-alive throughput (HTTP and HTTPS), **2.8-5.3x lower p99**, **1.6-2.7x** TLS handshakes per second, **3.8x** (HTTP) and **1.9x** (HTTPS) on a 64 KiB echo, but **4-8x more memory** (each worker carries its own runtime, about 7 MB idle). Plain connection setup is roughly on par and noisy (Gina's listener accepts one connection per tick per shard). `net/http` is a far more complete server; this is not a feature-equal comparison.
+Against Go `net/http` on the same cores (1 to 8, loopback, 256 connections), Gina with **N shard threads in one process**: **1.6-1.9x** keep-alive throughput (HTTP and HTTPS), **2.6-5.6x lower p99**, **1.7-2.9x** TLS handshakes per second, **4.0x** (HTTP) and **2.2x** (HTTPS) on a 64 KiB echo. Memory at 8 cores: 21 MB (Gina) vs 19 MB (net/http) on HTTP, 76 vs 25 MB over HTTPS. Plain connection setup is roughly on par and noisy (Gina's listener accepts one connection per tick per shard). The shared GC did not show up in p99, but the test is weak (small heap, no allocating handlers). `net/http` is a far more complete server; this is not a feature-equal comparison.
+
 
 ### Verification, and what is not verified
 
-- **Automated:** 63 tests, including supervision matrices, deterministic simulation sweeps, backpressure, HTTP parser tables plus a 300k-input seeded mutation test, real-socket HTTP and HTTPS integration tests (Go's `crypto/tls` client driven cooperatively on one thread), and TLS interop across 4 key types x 2 cipher orders x 2 curves with payloads to 100 KB. A negative control (a deliberately wrong HKDF label) is caught by the interop tests.
-- **By hand:** `curl` (OpenSSL 3.5) and `openssl s_client` against the HTTPS example (TLS 1.3 handshake, 200 KB echo byte-identical, TLS 1.2 refused with alert 70, plain HTTP on the TLS port closed); `Prefork` with 4 and 8 workers (even connection spread, a killed worker respawned, no orphans after the parent dies).
-- **Not verified:** the TLS code has had **no security audit** and should not guard anything that matters; no GC soak or leak test over long runs; no automated multi-process tests; Go's native fuzzer stalled in the sandbox, so parser fuzzing relies on the seeded mutation test; benchmarks are single-machine, loopback, short runs.
+- **Automated:** 73 tests, including supervision matrices, deterministic simulation sweeps, backpressure, HTTP parser tables plus a 300k-input seeded mutation test, real-socket HTTP and HTTPS integration tests, TLS interop with Go's `crypto/tls` client across 4 key types x 2 cipher orders x 2 curves (payloads to 100 KB), and a negative control (a deliberately wrong HKDF label is caught).
+- **Threaded runtime:** cross-thread ping-pong in two modes (always-sleep, which makes every hop use the eventfd wake path, and the default spin-then-sleep), all-to-all ring traffic across 4 threads checking for loss and reordering, timers firing on sleeping shards, stop latency, graceful shutdown, panic containment on a shard thread, and concurrent HTTP and HTTPS clients against 4 `SO_REUSEPORT` shard threads. These pass under **`go test -race`**, repeated 25-40 times, with no data race, hang or lost message.
+- **By hand:** `curl` (OpenSSL 3.5) and `openssl s_client` against the HTTPS example (TLS 1.3, 200 KB echo byte-identical, TLS 1.2 refused with alert 70, plain HTTP on the TLS port closed).
+- **Not verified:** the TLS code has had **no security audit** and should not guard anything that matters; no GC soak or leak test; the race detector only sees the interleavings that occur; Go's native fuzzer stalled in the sandbox, so parser fuzzing relies on the seeded mutation test; benchmarks are single-machine, loopback, short runs.
 
 ### Known limitations
 
-TLS: no TLS 1.2, ChaCha20-Poly1305, HelloRetryRequest, resumption, 0-RTT, client certificates; handshake crypto runs inline on the shard thread (about 82 µs ECDSA, 670 µs RSA-2048). HTTP: no chunked request bodies (501), no HTTP/2, handlers are synchronous (no waiting on other isolates until `Call`/`Reply` exists). Engine: one accept per tick per listener; no cross-process messaging; Linux-only I/O.
+- **Threaded mode:** while the system runs, only isolates may touch it (`Spawn`, `Send`, `Step` panic; no external injection API yet). Shard threads run user handlers concurrently, so state shared *between* isolates on different shards must be made thread-safe by the user. One shared heap and GC: a collection pauses every shard. No watchdog: a stuck handler blocks its shard. One accept per tick per listener.
+- **TLS:** no TLS 1.2, ChaCha20-Poly1305, HelloRetryRequest, resumption, 0-RTT, client certificates; handshake crypto runs inline on the shard thread (about 82 µs ECDSA, 670 µs RSA-2048).
+- **HTTP:** no chunked request bodies (501), no HTTP/2, handlers are synchronous (no waiting on other isolates until `Call`/`Reply` exists).
+- **Platform:** Linux-only I/O.
 
 ### Suggested next steps, in rough priority order
 
-1. `Call`/`Reply` with timeouts (unblocks asynchronous HTTP handlers) and `KeyToShard`.
-2. Determinism and type-aware lint rules (§2.3, §9.2) so the simulator's guarantees are enforced, not conventional.
-3. Batched accept; automated Prefork integration tests (kill/respawn, parent death).
-4. `gctune`: memory limit, pressure shedding, GC policy, then a soak test.
-5. The shared-memory transport and launcher (§7.1-7.2, §8.2 L3) if cross-process messaging is wanted; `ginactl` and a watchdog with it.
+1. `Call`/`Reply` with timeouts (unblocks asynchronous HTTP handlers) and `KeyToShard` (now meaningful: shards can really exchange messages across cores).
+2. A watchdog (per-shard heartbeat, Tina-style: exit the process so a supervisor restarts it) and a signal bridge for graceful SIGTERM, both now permitted in marked files.
+3. An external injection API (`Inject`) so non-shard code can send to a running system.
+4. Determinism rules for the simulator-visible core (§9.2); batched accept.
+5. `gctune`: memory limit, pressure shedding, GC policy, a soak test; evaluate whether the shared GC needs per-shard mitigation.
 6. TLS hardening: independent review, HelloRetryRequest, tickets; optionally ChaCha20 via `x/crypto`.
 7. HTTP: chunked bodies, streaming; Datastar SDK; the docs set; io_uring.
 
@@ -96,55 +107,52 @@ TLS: no TLS 1.2, ChaCha20-Poly1305, HelloRetryRequest, resumption, 0-RTT, client
 ### Goals
 1. Reproduce Tina's programming model in Go: **isolates** (state machines) that return **effects**, run by **shards** (one per core), exchanging fixed-size messages, supervised Erlang-style, deterministically testable.
 2. Keep Tina's constraints where they still make sense on a GC: **bounded resources by count** (slots, mailboxes, pools, rings), no shared mutable state between shards, no raw pointers in user code (generational handles), explicit backpressure (`MailboxFull`, `PoolExhausted`, …), "let it crash", and an allocation-free *engine* hot path. **Memory is managed by the Go garbage collector; there are no arenas** (§5).
-3. **Hard rule: no goroutines and no channels** (§2).
+3. **Confined concurrency**: goroutines and channels only in the thread host and tests that opt in; the engine is single-threaded per shard (§2).
 
 ### Non-goals (v1)
 - Windows and macOS backends (Linux only; the backend interface leaves room for kqueue).
 - Matching Odin's raw performance or hard real-time latency. We aim for an allocation-free engine hot path and short, per-shard GC pauses, not C parity.
 - API compatibility with upstream. The shape is the same, the surface is Go-idiomatic.
 
-## 2. The "no goroutines, no channels" rule
+## 2. Where concurrency is allowed
 
-### 2.1 Definition (enforceable)
-In all code under this repository and in every dependency we link:
-- no `go` statement;
-- no `chan` type, `make(chan …)`, `<-`, `select`, or `range` over a channel;
-- no package whose API requires channels or that starts goroutines on our behalf.
+### 2.1 History and rule
+Gina originally forbade goroutines and channels everywhere. That forced a process-per-shard design, and on 2026-10-07 the project owner relaxed it ("free to use goroutines and chan if needed") so the runtime can follow Tina's thread-per-core model. What remains is a rule about **confinement**:
 
-Denylist (checked in CI): `os/signal`, `context`, `net/http`, `net/rpc`, `os/exec` (use `syscall.ForkExec`), `time.After/AfterFunc/Tick/NewTimer/NewTicker`, `sync.WaitGroup`, `golang.org/x/sync/*`. `sync.Mutex`/`sync.Pool` are not needed and are banned by convention (shared-nothing). `sync/atomic`, `unsafe`, `reflect` (boot-time only), `syscall`, `golang.org/x/sys/unix`, `math/bits`, `time.Now`/`time.Duration`, `os` (args/env only) are allowed.
+- The engine (isolates, shard loop, scheduler, supervision, I/O reactor, rings, timers) is **single-threaded per shard**: no `go` statement, no channels, no mutexes.
+- Goroutines, channels and `sync` primitives are kept to `threads.go` (the thread host) and the tests that exercise it. This is a convention; nothing enforces it.
+- Shards share **only**: the ring matrix (atomic cursors), each shard's `sleeping` flag and wake eventfd, the `quarantined` flag, and the system stop flag. Every other piece of mutable state belongs to exactly one shard.
 
-### 2.2 What the rule does not cover
-The Go runtime has its own goroutines and threads (GC workers, `sysmon`, finalizers). They cannot be removed and are out of scope. The rule is about *our* program: every line of Gina code runs on the one main goroutine of each process. §5.5 tunes the GC (`GOMAXPROCS`, memory limit, idle-time collection).
+### 2.2 What this means for handler code
+Handlers run on N threads at once. State inside an isolate is safe. State shared *between* isolates on different shards (a captured counter, map or cache) is not, unless the handler makes it safe (atomics, a lock) or keeps it per shard indexed by `ctx.ShardID()`, as the HTTP server does. Immutable shared state (routes, config) is fine. While a system runs, `System.Spawn`, `Send` and `Step` panic: shards own their state.
 
 ### 2.3 Enforcement
-- `cmd/ginalint`: a `go/parser` + `go/types` checker that fails on any construct above in this module, plus `go list -deps` against the denylist. Runs in CI and as a `go test` in the root package.
-- A second lint bans `range` over maps and `math/rand`, `time.Now` in the deterministic core (§9.2).
+None. A syntactic linter (`ginalint`) once checked the confinement rule and was removed; keep goroutines, channels and `sync` out of the engine files by review.
 
-## 3. The central design problem and the decision
+### 2.4 What the Go runtime does anyway
+The runtime has its own goroutines and threads (GC workers, `sysmon`). They are out of scope.
 
-Tina gets multi-core parallelism from **OS threads pinned to cores**. In Go the only way to get a user thread is a goroutine, which is forbidden. Options:
+## 3. Architecture: thread per core (Tina's model)
 
-| Option | Parallelism | Verdict |
-|---|---|---|
-| A. Single thread, all shards cooperatively in one process | None | Used for the **simulator** and `-shards-inline` dev mode only |
-| B. Raw `clone(2)` threads | Yes | Rejected: corrupts Go runtime assumptions |
-| **C. One OS process per shard, shared-memory rings** | Yes | **Chosen for production** |
+Tina runs one OS thread per core, each owning a shard, joined by lock-free SPSC rings in shared memory. Gina does the same:
 
-Process-per-shard also keeps Tina's shared-nothing property literal, and gives stronger fault isolation than Tina's `sigaltstack`/`siglongjmp` trap.
+| Option | Verdict |
+|---|---|
+| A. All shards cooperatively on one thread (`System.Step`) | Kept for the **simulator** and unit tests: deterministic |
+| **B. One goroutine per shard, `LockOSThread`ed and optionally pinned (`sched_setaffinity`)** | **Default.** Tina's thread-per-core model |
+| D. Raw `clone(2)` threads | Rejected: corrupts Go runtime assumptions |
 
 ```
-                 launcher process (role=launcher; runs no isolates)
-   ┌─ memfd shared region ──────────────────────────────────────────┐
-   │ header │ shard ctl blocks │ N×(N-1) SPSC rings │ log rings      │
-   └────────┬──────────────────────┬────────────────────────────────┘
-            │ mmap MAP_SHARED      │
-     ┌──────┴─────┐          ┌─────┴──────┐
-     │ shard proc │ ◄─ring──►│ shard proc │ …   one per core, pinned
-     │ (role=shard)│         │            │     own Go heap + own GC
-     └────────────┘          └────────────┘     own epoll/timerfd/eventfd
+                                  one process
+  ┌── shard thread 0 ─────────┐   ring 0→1 (SPSC, atomic cursors)   ┌── shard thread 1 ─────────┐
+  │ isolates, message pool,   │ ──────────────────────────────────► │ isolates, message pool,   │
+  │ timers, sockets           │ ◄────────────────────────────────── │ timers, sockets           │
+  │ own epoll + wake eventfd  │   ring 1→0        N×(N-1) rings     │ own epoll + wake eventfd  │
+  └───────────────────────────┘                                     └───────────────────────────┘
+        pinned to core 0                                                   pinned to core 1
 ```
 
-The same binary is re-exec'd (`/proc/self/exe`, env `GINA_ROLE`, `GINA_SHARD_ID`) so isolate types registered in `main()` exist in every process. Each shard process has its **own heap and its own garbage collector**; a GC cycle in one shard never pauses another. The only memory shared between processes is the byte-oriented message transport (§7.1), never isolate state.
+Each shard thread runs the tick loop of §6.1, owns one `epoll` instance (sockets and timer deadlines) and one `eventfd` (wake-ups), and in the HTTP server owns its own `SO_REUSEPORT` listener. Because shards share one address space, a ring is just a pointer, exactly as in Tina.
 
 ## 4. Public API (package `gina`)
 
@@ -218,7 +226,7 @@ type Message struct {      // exactly 128 bytes; size asserted at compile time
 | Routing | `gina.KeyToShard(key uint64, shards uint8) uint8` (modulo; callers hash non-uniform keys first) |
 | Addresses | `gina.IPv4(a,b,c,d,port)`, `gina.IPv6(...)` |
 
-Result enums are copied from upstream: `SendResult{Ok, MailboxFull, PoolExhausted, StaleHandle, AttachNotLocal}`, `ReplyResult`, `CallResult{…, TargetQuarantined}`, `SubmitResult{…, NoStagingSlot, PayloadTooLarge}`, `SpawnError{SlotsFull, GroupFull, GroupNotAllocated, TypeNotAllocated, InitFailed, MemoryPressure}`, `ExitKind{Normal, Crashed, Shutdown}`, `RestartType{Permanent, Transient, Temporary}`. All result-returning functions are annotated in docs as must-check; `ginalint` flags discarded results unless assigned to `_`.
+Result enums are copied from upstream: `SendResult{Ok, MailboxFull, PoolExhausted, StaleHandle, AttachNotLocal}`, `ReplyResult`, `CallResult{…, TargetQuarantined}`, `SubmitResult{…, NoStagingSlot, PayloadTooLarge}`, `SpawnError{SlotsFull, GroupFull, GroupNotAllocated, TypeNotAllocated, InitFailed, MemoryPressure}`, `ExitKind{Normal, Crashed, Shutdown}`, `RestartType{Permanent, Transient, Temporary}`. All result-returning functions are annotated in docs as must-check;
 
 ### 4.4 Boot
 ```go
@@ -232,7 +240,7 @@ func Run(spec SystemSpec) int   // never returns in a shard; returns exit code i
 ### 5.1 Principles
 - **No arenas, no `mmap`'d allocators, no `unsafe` casts for isolate state.** Isolate state, mailboxes, message pools, timer entries and I/O buffers are ordinary Go values owned by their shard process and reclaimed by the Go GC.
 - **Bounded by count, softly bounded by bytes.** Slot counts, mailbox capacity, pool size, timer entries and ring size stay fixed and enforced, so overflow still produces explicit results (`MailboxFull`, `PoolExhausted`, `SlotsFull`). Bytes are bounded by `ShardMemoryLimit` through `debug.SetMemoryLimit` plus the pressure policy in §5.5. A GC heap cannot be hard-capped, so this is a soft bound.
-- **Shared-nothing is preserved by the process model.** Each shard is its own process with its own heap and its own GC. A cross-shard Go pointer is impossible, and a GC cycle in one shard never pauses another. Small independent heaps are what make the GC cheap here.
+- **Shared-nothing is preserved by design.** Shards never touch each other's isolates, pools, timers or sockets; the only shared memory is the ring matrix and a few atomic flags (§2.1). **In thread mode the Go heap and garbage collector are shared by every shard**, so a collection's stop-the-world phase pauses all of them.
 
 ### 5.2 Isolate storage
 `internal/slab.Store[T]` is a typed, chunked slot store:
@@ -253,8 +261,8 @@ Isolates may hold any Go data (slices, maps, strings, pointers). Rules:
 - The **engine** hot path (tick, dispatch, mailboxes, pool, timer wheel, ring publish, reactor poll, supervision bookkeeping) allocates nothing. This is test-enforced (§10) with no-op handlers.
 - **User handlers may allocate**, but the docs state the cost model: GC work scales with live pointers, not bytes. Guidance: reuse buffers held in isolate state, size slices once, prefer `[]struct` to `[]*struct`, use indexes or `Handle`s instead of pointer graphs, and keep per-connection state small. A `gina/gcstats` helper reports per-type live bytes (sampled via `runtime/metrics`).
 
-### 5.5 GC integration (per shard process)
-Boot-time settings, all overridable in `SystemSpec.GC`:
+### 5.5 GC integration (planned; not built)
+In thread mode these knobs are process-wide. Boot-time settings, all overridable in `SystemSpec.GC`:
 
 | Knob | Default | Notes |
 |---|---|---|
@@ -301,14 +309,11 @@ Per-isolate mailbox (default 256) → `MailboxFull`; per-shard pool → `PoolExh
 
 ## 7. Cross-shard transport and I/O (Linux, no cgo)
 
-### 7.1 Shared region
-This is the **only** memory shared between processes, and it holds only fixed-layout bytes (rings, control blocks). It is an IPC transport, not an allocator: no isolate state and no Go pointer ever lives in it.
-Created by the launcher with `memfd_create`, `ftruncate`, passed to children as inherited fd (`syscall.ForkExec` with `Files`), mapped `MAP_SHARED`. Layout: header (magic, version, **spec hash** — children refuse to start on mismatch), per-shard control block (state, `epoch`, heartbeat counter, `sleeping` flag, pid), `N×(N-1)` SPSC rings of 128-byte slots, optional per-shard log rings.
-
-Ring cursors (`head`, `tail`) live in the shared region on separate cache lines and are accessed only with `sync/atomic` on 8-byte-aligned `*uint64`. Producer caches the consumer's head locally; consumer caches the tail. Slots are written with plain stores, published by the tail store.
+### 7.1 Rings
+One ring per ordered shard pair, N×(N-1) in total, allocated by `NewSystem` before any thread starts. Each ring holds 128-byte `Message` slots (power-of-two capacity, `SystemSpec.RingSize`) and is laid out as in Tina: a **producer** cache-line pair (published cursor, local staged cursor, cached copy of the consumer's cursor), a **consumer** cache-line pair (read cursor, local cursor, cached copy of the producer's cursor), and a cold part (buffer, mask). The producer writes slots with plain stores and publishes the whole tick's batch with **one atomic store**; the consumer sees it with one atomic load and returns the slots with **one atomic store per drain**. A full ring fails the send immediately (`RingFull`); nothing overflows. Go's atomics are sequentially consistent, stronger than the release/acquire Tina needs; the cost was about 18 ns per ping-pong round.
 
 ### 7.2 Wake-ups
-Each shard owns an `eventfd` registered in its epoll set. Before blocking, a shard sets `sleeping=1`, re-checks inbound rings (closing the race), then waits. A producer that published a batch checks the target's `sleeping` flag and writes the eventfd only if set — no syscall on the hot path under load.
+Each shard owns an `eventfd` registered in its own epoll set. The protocol that cannot lose a wake-up: the sleeper (1) spins briefly checking its rings, (2) stores `sleeping=1`, (3) checks for work **once more**, (4) blocks in `epoll_wait` (with the next timer deadline as timeout), (5) clears the flag. A sender (a) publishes into the ring, then (b) loads the target's `sleeping` flag and writes the eventfd only if it is set. With sequentially consistent atomics at least one side sees the other, so a message is never stranded; under load no syscall is made. `Stop` writes the eventfd unconditionally. *(Tina's published source shows no wake protocol; this one is ours.)* `RunOptions.SpinFor` (default 20 µs) sets how long to spin before blocking; spinning cut a cross-thread hop from about 2.0 µs to 0.21 µs.
 
 ### 7.3 Reactor (`Backend` interface)
 ```go
@@ -323,7 +328,7 @@ type Backend interface {
 - **`simBackend`**: scripted completions and faults (§9).
 - `FDHandle` is a generational index into a shard-local FD table; isolates never see raw fds.
 - Inbound data lands in shard-owned slots, read via `ReadIOSlot`, reclaimed automatically when the handler returns (safe if the isolate crashes mid-flight). Outbound data is read straight from the parked isolate's state (or a staging slot).
-- **FD handoff between shards** (upstream has a handoff table): since shards are processes, hand off with `SCM_RIGHTS` over a per-pair `socketpair` (`unix.Sendmsg` + `UnixRights`), registered in the receiving shard's handoff table. Default accept strategy is simpler: each shard binds its own listener with `SO_REUSEPORT`.
+- **FD handoff between shards** (upstream has a handoff table): not built. Within one process a descriptor can be re-registered in another shard's fd table. The default accept strategy needs neither: each shard binds its own listener with `SO_REUSEPORT`.
 
 ## 8. Supervision and fault containment
 
@@ -335,34 +340,32 @@ Groups form a tree built from the boot spec (static children + `ChildCountDynami
 |---|---|---|
 | 1 | Isolate returns `Crash`, or a **panic/fault** is recovered | Wipe slot, bump generation, supervisor applies strategy |
 | 2 | Group restart budget exhausted, or live heap stays above `ShardMemoryLimit` after a forced GC (§5.5) | Tear down all isolates in the shard (zero every slot so references are dropped), reset pools, rebuild the tree from the boot spec, then `runtime.GC()` so memory is actually returned; other shards unaffected |
-| 3 | Root budget exhausted, unrecoverable runtime fault (OOM, stack overflow, `fatal error`), or watchdog timeout | Shard process exits/is killed; **launcher** applies `QuarantinePolicy` |
+| 3 | Root budget exhausted, unrecoverable runtime fault (OOM, stack overflow, `fatal error`), or watchdog timeout | **Thread mode:** the process exits (a fatal runtime error cannot be contained per shard) and an external supervisor restarts it. |
 
-**Trap boundary** (replaces `sigaltstack`/`siglongjmp`): the shard loop runs turns inside a function with `defer recover()` and `SetPanicOnFault(true)`, so Go panics *and* faulting `unsafe` accesses are recoverable. The loop records the current (type, slot) in a plain variable before each turn; on recovery it logs, treats that isolate as crashed (Level 1) and re-enters the loop. Messages the crashed turn had already sent stay sent **(ours)**; its staged-but-uncommitted I/O is discarded. Runtime-fatal errors cannot be recovered; those are Level 3 by design, and process isolation makes that safe for other shards.
+**Trap boundary** (replaces `sigaltstack`/`siglongjmp`): the shard loop runs turns inside a function with `defer recover()` and `SetPanicOnFault(true)`, so Go panics *and* faulting `unsafe` accesses are recoverable. The loop records the current (type, slot) in a plain variable before each turn; on recovery it logs, treats that isolate as crashed (Level 1) and re-enters the loop. Messages the crashed turn had already sent stay sent **(ours)**; its staged-but-uncommitted I/O is discarded. Runtime-fatal errors cannot be recovered; those are Level 3 by design. In thread mode they take the whole process down.
 
-**Watchdog** (no goroutines, no signals): each shard increments a heartbeat counter in its control block once per tick. The launcher checks heartbeats; a shard that stalls past `WatchdogTimeout` (a handler stuck in a loop) is `SIGKILL`ed.
+**Watchdog (not built).** In thread mode a handler stuck in a loop blocks its shard's thread and Go cannot kill a goroutine. The Tina-style answer is a watchdog (now permitted as a goroutine in a marked file) that watches per-shard heartbeat counters and exits the process after `WatchdogTimeout`, so an external supervisor restarts it.
 
-**Launcher** (single-threaded loop on `epoll`): one `pidfd` per shard; on exit it respawns with a fresh heap and a bumped `epoch` (new generation floor so old handles to that shard go stale), subject to its own restart budget. Budget exhausted → `Quarantine`: shard stays down, cross-shard sends to it return `StaleHandle`/`TargetQuarantined`; revived by `ginactl revive <id>`. Under `Abort` the launcher exits non-zero so systemd/Kubernetes restarts the whole service.
-Residual risk: generation floors are `epoch<<16`; a slot recycled >65 535 times in one lifetime could theoretically collide with a prior epoch's handle. Documented, accepted for v1.
 
 ### 8.3 Shutdown
-No framework-ordered shutdown. `TagShutdown` is delivered to every isolate; natural ordering emerges (listeners stop, connections drain). `ShutdownTimeout` is the safety net, after which the launcher kills remaining shards. Trigger: `ginactl shutdown` over a Unix control socket owned by the launcher. See open question Q1 for OS signals.
+No framework-ordered shutdown. `System.Stop` (or `Ctx.StopSystem` from an isolate) delivers `TagShutdown` to every isolate and cancels their in-flight I/O so they wake; natural ordering emerges (listeners stop, connections drain). Isolates still alive after `RunOptions.ShutdownGrace` (default 5 s) are force-freed, so an isolate that ignores `TagShutdown` delays the stop by the full grace period. OS signals are not handled yet (SIGTERM exits immediately); a bridge is now permitted in a marked file.
 
 ## 9. Deterministic simulation testing
 
 ### 9.1 Architecture
-`Simulator` runs **all shards in one process on one thread**. The shard engine is written against three seams — `Clock`, `Backend`, `Transport` — so production code paths run unchanged:
+`Simulator` runs **all shards on one thread** with the cooperative driver (`System.Step`); threaded runs are not deterministic. The shard engine is written against three seams — `Clock`, `Backend`, `Transport` — so production code paths run unchanged:
 - `SimClock`: a tick counter advanced by the harness.
 - `simBackend`: scripted I/O completions, injectable errors, delays.
 - `simTransport`: the same SPSC ring code over ordinary memory, plus drops, delays, duplication, and partitions.
 Each round: advance clock → fault engine → **shuffle shard order** (emulates production phase drift) → tick each shard → run checkers.
 
-### 9.2 Determinism contract (lint-enforced in `internal/` and the simulator)
-All randomness from a **PRNG tree**: master seed → SplitMix64 → independent child streams per domain (network, scheduling, faults, each isolate type). Generator is our own **xoshiro256\*\*** (not `math/rand`, whose stream is not part of our compatibility contract). Faults are integer `Ratio{Num, Den}`, no floats. Forbidden in the core: `range` over maps, `time.Now`, `math/rand`, `select`, reading env/clock, address-dependent ordering (e.g. sorting by pointer value), and `runtime.SetFinalizer`/`AddCleanup`/`weak`/`unique` (no behaviour may depend on GC timing). User isolates run under the same contract in the simulator: iterating a Go map in a handler makes a run non-reproducible, so `ginalint -sim` flags it in user packages. Same seed + same config ⇒ identical trace hash (FNV-1a over a canonical event stream). Failures print the seed; `GINA_SEED=…` replays.
+### 9.2 Determinism contract (the simulator and `internal/`)
+All randomness from a **PRNG tree**: master seed → SplitMix64 → independent child streams per domain (network, scheduling, faults, each isolate type). Generator is our own **xoshiro256\*\*** (not `math/rand`, whose stream is not part of our compatibility contract). Faults are integer `Ratio{Num, Den}`, no floats. Forbidden in the core: `range` over maps, `time.Now`, `math/rand`, `select`, reading env/clock, address-dependent ordering (e.g. sorting by pointer value), and `runtime.SetFinalizer`/`AddCleanup`/`weak`/`unique` (no behaviour may depend on GC timing). User isolates run under the same contract in the simulator: iterating a Go map in a handler makes a run non-reproducible. Same seed + same config ⇒ identical trace hash (FNV-1a over a canonical event stream). Failures print the seed; `GINA_SEED=…` replays.
 
 ### 9.3 Checkers
 Run at intervals and at end: pool conservation (free + in-use = capacity), generation monotonicity, mailbox bounds, FD-table/handoff invariants, scheduler fairness (no ready isolate starved beyond N ticks), plus user-supplied invariants via `RegisterChecker`.
 
-Because the engine is single-threaded and goroutine-free, simulation needs no virtual-time hacks. Determinism is a property of the design, not a layer on top.
+Because the cooperative driver runs every shard on one thread, simulation needs no virtual-time hacks. Determinism is a property of the design, not a layer on top.
 
 ## 10. Testing and quality gates
 
@@ -374,9 +377,7 @@ Because the engine is single-threaded and goroutine-free, simulation needs no vi
 | Engine alloc-free | `testing.AllocsPerRun` on tick/dispatch/send/timer/ring/reactor-poll with no-op handlers; budget 0 | CI |
 | GC behaviour | soak: spawn/crash/tear down 10M isolates holding slices and maps; live heap stays flat (no reference leaks through slots, mailboxes, pool entries, attachments, timers). Record `/sched/pauses/total/gc:seconds` and tick-latency percentiles per `GCPolicy` against a stored baseline | CI (nightly) |
 | Escape analysis | `go build -gcflags=-m` diffed for `internal/sched` hot functions | CI |
-| Rule | `ginalint` (§2.3) | CI, blocking |
-| Multi-process | launcher + 2–4 shards, ring ping-pong, kill -9 a shard and verify respawn + stale handles, stalled-handler watchdog | integration, Linux only |
-| Race | `-race` is meaningless per-process; instead run the ring against a concurrent torture harness **in separate processes** over the shared memfd | integration |
+| Threaded runtime | cross-thread ping-pong (always-sleep = lost-wake-up stress; default spin), all-to-all ring traffic with loss/order checks, timers on sleeping shards, stop latency, graceful shutdown, panic containment, concurrent HTTP/HTTPS clients on `SO_REUSEPORT` shard threads | `go test -race`, repeated (**present**) |
 | Examples | TCP echo and task dispatcher end-to-end, load tested with an external client | acceptance |
 
 Initial performance targets (to be *measured*, not assumed): 0 allocs/op on engine hot paths; GC pause p99 and tick-latency p99 under a steady spawn/crash churn workload, per `GCPolicy`; same-shard send+dispatch and cross-shard ring round trip benchmarked and tracked per commit. Absolute numbers are set after M3.
@@ -403,7 +404,7 @@ gina/
     log/        ring + flush                            (logging*)
     prng/       xoshiro256**, SplitMix64                (prng)
     sim/        clock, faults, checkers, harness        (simulat*, sim_network)
-  cmd/ginalint/  cmd/ginactl/
+  cmd/ginactl/
   examples/echo/  examples/dispatcher/
   extensions/http/  extensions/datastar/
   docs/{concepts,guides,reference}/
@@ -414,15 +415,14 @@ Dependency direction is strictly downward (`internal/slab` imports nothing of ou
 ```
 gina/                         module "gina"; no external dependencies
   types.go spec.go slab.go ring.go timer.go shard.go supervise.go system.go sim.go   # package gina: the engine
+  threads.go pin_linux.go pin_other.go            # the thread host: the only engine file with goroutines; CPU pinning
   ctx_io.go reactor_linux.go reactor_other.go     # I/O API and the epoll reactor (stub on other OSes)
-  prefork_linux.go prefork_other.go               # multi-process launcher
-  gina_test.go
-  internal/prng/  internal/lint/                  # PRNG tree; the no-goroutine/no-channel linter
-  cmd/ginalint/
-  extensions/http/   parser.go router.go context.go server.go (+ tests)
+  gina_test.go threads_test.go                    # single-thread suite; threaded-runtime suite (-race)
+  internal/prng/                                  # PRNG tree
+  extensions/http/   parser.go router.go context.go server.go sse.go (+ tests, incl. threads_test.go)
   extensions/tls/    config.go conn.go keys.go record.go alert.go (+ tests, benchmarks)
-  examples/{pingpong,supervised,httpserver,https}/
-  bench/             run.sh summarize.py plot.py results.csv results*.{png,svg}  nethttp/ (separate module: comparison baseline)
+  examples/{pingpong,supervised,shards,httpserver,https,sse}/
+  bench/             run.sh summarize.py plot.py results*.csv results*.{png,svg}  nethttp/ (separate module: comparison baseline)
   docs/BENCHMARKS.md
 ```
 
@@ -430,12 +430,12 @@ gina/                         module "gina"; no external dependencies
 
 | M | Deliverable | Exit criteria | Status |
 |---|---|---|---|
-| M0 | `go.mod`, `ginalint`, CI, layout tests | Lint rejects `go`/`chan`/denylist fixtures | **Done** (lint is syntactic; no CI workflow in the repo) |
+| M0 | `go.mod`, `ginalint`, CI, layout tests | Lint rejects `go`/`chan`/denylist fixtures | **Done, then lint removed** (no CI workflow in the repo) |
 | M1 | slab store, handle, message, bitmap, ring, pool, wheel, PRNG | Unit tests; zero-alloc benchmarks for engine structures | **Mostly**: all but bitmap and wheel (heap instead) |
 | M2 | Single-shard scheduler + effects + ctx send/spawn/timers, `simBackend`, simulator v1 | Determinism test; backpressure tests | **Done** (no `simBackend`: the simulator has no I/O) |
 | M3 | Supervision L1-L2, trap boundary, call/reply, attachments | Strategy/budget sims; panic + fault recovery tests | **Mostly**: call/reply missing |
 | M4 | Multi-shard in simulator (sim transport, shuffle, checkers, fault injection) | Seed sweep green in CI | **Mostly**: 30-seed sweep; fewer fault kinds than planned |
-| M5 | Launcher, shm transport, eventfd wake-ups, multi-process mode, watchdog, L3 | Kill/respawn integration tests | **Replaced** by `gina.Prefork` (independent processes); the shm design is not built |
+| M5 | Launcher, shm transport, eventfd wake-ups, multi-process mode, watchdog, L3 | Kill/respawn integration tests | **Replaced** by the thread host (`Start/Run/Stop`), atomic in-process rings and eventfd wake-ups (all done, tested under `-race`). Watchdog not built |
 | M6 | epoll reactor, TCP echo example, FD handoff | Echo under external load; engine allocs/op = 0; GC report | **Mostly**: epoll and load tests done (HTTP instead of a TCP echo example); no fd handoff, no GC report |
 | M7 | `extensions/http` and Datastar SDK | Conformance tests; dispatcher example | **HTTP done, plus TLS** (not originally planned); Datastar and dispatcher example not built |
 | M8 | Optional io_uring backend; docs set; benchmarks | Backend parity suite | **Benchmarks done** (`bench/`, `docs/BENCHMARKS.md`); io_uring and the docs set not built |
@@ -443,28 +443,29 @@ gina/                         module "gina"; no external dependencies
 ## 13. Deviations from upstream (summary)
 | Upstream | Gina | Reason |
 |---|---|---|
-| OS threads per core | Processes per core | Threads need goroutines |
-| `sigaltstack`+`siglongjmp` trap | `recover` + `SetPanicOnFault`; process death = Level 3 | Idiomatic, safe in Go |
-| Watchdog calls `_exit(0)` | Launcher kills/respawns the shard | Process isolation |
-| `SIGUSR2` revives a quarantined shard | `ginactl revive` | Go's signal handling needs `os/signal` (banned) |
+| OS threads per core | **Same**: one goroutine per shard locked to an OS thread (optional `sched_setaffinity` pinning) | Goroutines were allowed on 2026-10-07 |
+| `sigaltstack`+`siglongjmp` trap | `recover` + `SetPanicOnFault` (per goroutine); process exit = Level 3 | Idiomatic, safe in Go |
+| Watchdog calls `_exit(0)` | Not built; same approach planned (exit and let a supervisor restart) | Go cannot kill a goroutine |
+| `SIGUSR2` revives a quarantined shard | `System.Revive` (programmatic, single-thread driver only); no signal or `ginactl` | Not built |
 | io_uring / kqueue / IOCP | epoll (v1), io_uring (v2) | Scope; Linux only |
-| No GC, arenas, pointer-free state | **GC on, no arenas**; isolate state is ordinary Go, only message payloads are pointer-free | Requested design goal; process-per-shard keeps heaps small and independent |
+| No GC, arenas, pointer-free state | **GC on, no arenas**; isolate state is ordinary Go, only message payloads are pointer-free | Requested design goal. Thread mode shares one heap and one collector (Tina has none) |
 | Hard byte bound from a fixed arena | Bound by counts + soft `ShardMemoryLimit` + pressure shedding | A GC heap cannot be hard-capped; latency is no longer strictly deterministic |
 | Odin `rawptr` + `self_as` | Generic `*T` handler param | Type safety by construction |
 | Transfer buffers (shard-local) | Same-shard attachments; cross-shard data is still decomposed | GC makes arbitrary local hand-off safe |
-| Tina's HTTP extension runs on its shard threads | `extensions/http` runs on isolates in one `System`; multi-core via `Prefork` + `SO_REUSEPORT` | No threads; same kernel load balancing |
+| Tina's HTTP extension runs on its shard threads | Same: `extensions/http` runs on isolates on shard threads, one `SO_REUSEPORT` listener per shard | Kernel load balancing across listeners |
 | TLS via the platform library | A sans-I/O TLS 1.3 server in `extensions/tls` | Stdlib `crypto/tls` cannot run inside an isolate; **unaudited** |
 
 ## 14. Decisions and open questions
 
-Resolved by what was built:
-- **Q1 - OS signals:** the rule was kept absolute (no `os/signal`). SIGTERM/SIGINT therefore terminate the process immediately; graceful shutdown is the programmatic `System.Shutdown`. `ginactl` is not built.
-- **Q2 - process vs. thread:** accepted in the form of `Prefork` (independent processes). Shards inside a process share one thread.
-- **Q3 - platform scope:** Linux only for I/O and `Prefork`; the engine builds elsewhere (cross-compiled for macOS) but has no sockets there.
+Resolved:
+- **Q1 - OS signals / the no-goroutine rule:** the rule was relaxed (2026-10-07) to confinement (§2). A SIGTERM bridge is now permitted in a marked file; not built, so SIGTERM still exits immediately.
+- **Q2 - process vs. thread:** threads, as in Tina (shard goroutines locked to OS threads). A process-per-worker `Prefork` was built and removed (no cross-worker messaging).
+- **Q3 - platform scope:** Linux only for I/O; the engine builds elsewhere (cross-compiled for macOS) but has no sockets there.
 - **Q4 - name, license:** module `gina`. This repository's `LICENSE` is **MIT** (Manos Ragiadakos); upstream Tina is Apache-2.0. Gina reimplements the documented behaviour and copies no upstream source, so MIT is workable; if upstream code is ever copied or transliterated, Apache-2.0's attribution and NOTICE requirements apply to that code. There is no `NOTICE` file and no CI workflow in the repo yet.
 - **Q5 - io_uring:** deferred.
 
 Still open:
-- **Q6 - GC defaults.** `gctune` is not built, so Go's defaults apply (each Prefork worker's runtime sizes its own `GOMAXPROCS`). Decide after the GC soak and pause measurements exist.
-- **Q7 - cross-process messaging.** Is `Prefork` (no messaging between workers) enough, or is the shared-memory transport (§7.1-7.2) wanted? That choice sets how much of §3/§7/§8.2 is built next.
+- **Q6 - GC defaults.** `gctune` is not built, so Go's defaults apply, and in thread mode the collector is shared by all shards. Decide after GC soak and pause measurements exist, including whether a mitigation is needed.
 - **Q8 - TLS ownership.** Keep the in-repo TLS (needs a security review before any real use), or document it as development-only and terminate TLS in front of Gina?
+- **Q9 - stuck-handler policy.** Adopt Tina's watchdog behaviour (exit the process and rely on a supervisor), or something gentler?
+- **Q10 - external control of a running system.** Add a thread-safe `Inject`/command inbox so non-shard code can send messages and spawn isolates while the system runs?

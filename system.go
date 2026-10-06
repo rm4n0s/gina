@@ -3,6 +3,7 @@ package gina
 import (
 	"fmt"
 	"runtime/debug"
+	"sync/atomic"
 	"time"
 
 	"gina/internal/prng"
@@ -51,6 +52,8 @@ type System struct {
 	order   []uint8
 	rounds  uint64
 	iop     ioPoller
+	stopReq atomic.Bool // set by Stop or Ctx.StopSystem; threaded shards then shut down
+	run     *runState   // non-nil once Start was called
 }
 
 func NewSystem(spec SystemSpec, opt Options) (*System, error) {
@@ -59,15 +62,17 @@ func NewSystem(spec SystemSpec, opt Options) (*System, error) {
 		return nil, err
 	}
 	sys := &System{spec: spec, clock: opt.Clock, trace: opt.Trace, faults: opt.Faults, shuffle: opt.Shuffle}
-	if err := sys.initIO(); err != nil {
-		return nil, err
-	}
 	if sys.clock == nil {
 		sys.clock = NewRealClock()
 	}
 	n := len(spec.Shards)
 	for i := 0; i < n; i++ {
-		sys.shards = append(sys.shards, newShard(sys, uint8(i), spec))
+		sh, err := newShard(sys, uint8(i), spec)
+		if err != nil {
+			sys.Close()
+			return nil, err
+		}
+		sys.shards = append(sys.shards, sh)
 		sys.order = append(sys.order, uint8(i))
 	}
 	for i, a := range sys.shards {
@@ -85,11 +90,15 @@ func NewSystem(spec SystemSpec, opt Options) (*System, error) {
 			}
 		}
 	}
+	if err := sys.initIO(); err != nil {
+		sys.Close()
+		return nil, err
+	}
 	old := debug.SetPanicOnFault(true)
 	defer debug.SetPanicOnFault(old)
 	for _, sh := range sys.shards {
 		if err := sh.bootSpawns(); err != nil {
-			sys.closeIO()
+			sys.Close()
 			return nil, err
 		}
 	}
@@ -113,6 +122,7 @@ func (sys *System) BootHandle(shard, i int) Handle {
 
 // Spawn starts an isolate on a shard from outside the system.
 func (sys *System) Spawn(shard int, sp SpawnSpec) (Handle, SpawnError) {
+	sys.assertStopped("Spawn")
 	old := debug.SetPanicOnFault(true)
 	defer debug.SetPanicOnFault(old)
 	return sys.shards[shard].spawn(&sp, 0)
@@ -120,10 +130,11 @@ func (sys *System) Spawn(shard int, sp SpawnSpec) (Handle, SpawnError) {
 
 // Send injects a message from outside the system.
 func (sys *System) Send(to Handle, tag Tag, payload []byte) SendResult {
+	sys.assertStopped("Send")
 	if len(payload) > MaxPayload {
 		return SendPayloadTooLarge
 	}
-	if int(to.Shard()) >= len(sys.shards) || sys.shards[to.Shard()].quarantined {
+	if int(to.Shard()) >= len(sys.shards) || sys.shards[to.Shard()].quarantined.Load() {
 		return SendStaleHandle
 	}
 	var m Message
@@ -146,10 +157,8 @@ func (sys *System) Step() bool {
 	if sys.shuffle != nil {
 		sys.shuffle.ShuffleU8(sys.order)
 	}
+	sys.assertStopped("Step")
 	progress := false
-	if sys.pendingIO() && sys.pollIO(0) > 0 {
-		progress = true
-	}
 	for _, id := range sys.order {
 		if sys.shards[id].Tick() {
 			progress = true
@@ -172,7 +181,7 @@ func (sys *System) nextTimer() (uint64, bool) {
 	var best uint64
 	found := false
 	for _, sh := range sys.shards {
-		if sh.quarantined {
+		if sh.quarantined.Load() {
 			continue
 		}
 		if d, ok := sh.timers.peek(); ok && (!found || d < best) {
@@ -208,7 +217,7 @@ func (sys *System) RunUntilIdle(maxRounds int) (rounds int, idle bool) {
 				}
 			}
 			if io {
-				sys.pollIO(timeout)
+				sys.waitIO(timeout)
 			} else {
 				rc.WaitUntil(due)
 			}
@@ -225,7 +234,7 @@ func (sys *System) RunUntilIdle(maxRounds int) (rounds int, idle bool) {
 
 func (sys *System) pendingIO() bool {
 	for _, sh := range sys.shards {
-		if !sh.quarantined && sh.io.active() > 0 {
+		if !sh.quarantined.Load() && sh.io.active() > 0 {
 			return true
 		}
 	}
@@ -248,6 +257,7 @@ func (sys *System) Listen(shard int, spec ListenSpec) (FDHandle, uint16, error) 
 func (sys *System) Close() {
 	for _, sh := range sys.shards {
 		sh.io.reset()
+		sh.io.close()
 	}
 	sys.closeIO()
 }
@@ -256,7 +266,7 @@ func (sys *System) Close() {
 // to finish, then force-frees stragglers. It returns how many had to be forced.
 func (sys *System) Shutdown(maxRounds int) (forced int) {
 	for _, sh := range sys.shards {
-		if !sh.quarantined {
+		if !sh.quarantined.Load() {
 			sh.beginShutdown()
 		}
 	}
@@ -281,7 +291,7 @@ func (sys *System) Revive(shard int) error {
 	old := debug.SetPanicOnFault(true)
 	defer debug.SetPanicOnFault(old)
 	sh := sys.shards[shard]
-	sh.quarantined = false
+	sh.quarantined.Store(false)
 	sh.resetBudget = newBudget(sys.spec.ResetMax, sys.spec.ResetWindow)
 	sh.epoch++
 	sh.wipe()

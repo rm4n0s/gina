@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"gina"
-	"gina/internal/lint"
 )
 
 const (
@@ -586,16 +585,6 @@ func TestEngineHotPathIsAllocationFree(t *testing.T) {
 	}
 	if sys.Shard(0).Stats().Turns == 0 || sys.Shard(1).Stats().Turns == 0 {
 		t.Fatal("no turns ran")
-	}
-}
-
-func TestRepoHasNoGoroutinesOrChannels(t *testing.T) {
-	fs, err := lint.CheckDir(".")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, f := range fs {
-		t.Error(f)
 	}
 }
 

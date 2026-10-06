@@ -3,6 +3,7 @@ package http
 import (
 	"errors"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -15,7 +16,7 @@ import (
 type Config struct {
 	Addr      [4]byte // default 0.0.0.0
 	Port      uint16  // 0 = ephemeral (each shard gets its own; read with Port())
-	ReusePort bool    // SO_REUSEPORT: every shard (and every Prefork worker) binds the same port
+	ReusePort bool    // SO_REUSEPORT: every shard binds the same port
 	Backlog   int     // default 1024
 
 	MaxConns       int // per shard (default 1024); further connections are accepted and closed
@@ -68,15 +69,21 @@ type Server struct {
 	router *Router
 	lim    limits
 
-	ports     []uint16
-	listenErr error
-	requests  uint64
-	conns     int
-	rejected  uint64
-	bufs      [][]byte
+	st        []shardState // indexed by shard id; each is touched only by its own shard's thread
+	listenErr atomic.Pointer[error]
+}
 
-	dateSec int64
-	dateBuf []byte
+// shardState is everything the server mutates per shard. With one thread per
+// shard nothing here is shared, so the buffer pool and date cache need no locks;
+// the counters are atomic only so other threads can read them (Requests, Conns).
+type shardState struct {
+	requests, rejected atomic.Uint64
+	conns              atomic.Int64
+	port               atomic.Uint32
+	bufs               [][]byte
+	dateSec            int64
+	dateBuf            []byte
+	_                  [64]byte // keep neighbouring shards' counters off one cache line
 }
 
 func New(cfg Config, r *Router) *Server {
@@ -85,14 +92,44 @@ func New(cfg Config, r *Router) *Server {
 }
 
 // Port returns the port a shard's listener bound (0 before it started).
-func (s *Server) Port(shard int) uint16 { return s.ports[shard] }
+func (s *Server) Port(shard int) uint16 { return uint16(s.st[shard].port.Load()) }
 
 // ListenErr returns the last bind/listen error (e.g. EADDRINUSE), if any.
-func (s *Server) ListenErr() error { return s.listenErr }
+func (s *Server) ListenErr() error {
+	if e := s.listenErr.Load(); e != nil {
+		return *e
+	}
+	return nil
+}
 
-func (s *Server) Requests() uint64 { return s.requests } // completed requests in this process
-func (s *Server) Conns() int       { return s.conns }    // open connections in this process
-func (s *Server) Rejected() uint64 { return s.rejected } // connections shed because a shard was full
+func (s *Server) setListenErr(err error) { s.listenErr.Store(&err) }
+
+// Requests is the number of completed requests (all shards); Conns the open
+// connections; Rejected the connections shed because a shard was full.
+func (s *Server) Requests() uint64 {
+	return sumU(s.st, func(t *shardState) uint64 { return t.requests.Load() })
+}
+func (s *Server) Conns() int {
+	var n int64
+	for i := range s.st {
+		n += s.st[i].conns.Load()
+	}
+	return int(n)
+}
+func (s *Server) Rejected() uint64 {
+	return sumU(s.st, func(t *shardState) uint64 { return t.rejected.Load() })
+}
+
+func sumU(st []shardState, f func(*shardState) uint64) uint64 {
+	var n uint64
+	for i := range st {
+		n += f(&st[i])
+	}
+	return n
+}
+
+// sh returns the calling shard's state.
+func (s *Server) sh(g *gina.Ctx) *shardState { return &s.st[g.ShardID()] }
 
 // Install adds the server's isolate types and one listener per shard to spec,
 // and sizes the pools it needs. Create the shards first (len(spec.Shards)).
@@ -109,7 +146,7 @@ func (s *Server) Install(spec *gina.SystemSpec) error {
 	if n > 1 && !s.cfg.ReusePort {
 		return errors.New("http: more than one shard needs Config.ReusePort (each shard binds its own listener)")
 	}
-	s.ports = make([]uint16, n)
+	s.st = make([]shardState, n)
 	lid, cid := s.cfg.TypeIDBase, s.cfg.TypeIDBase+1
 	spec.Types = append(spec.Types,
 		gina.RegisterType(lid, gina.TypeOptions{SlotCount: 2, MailboxCapacity: 4}, s.listenerInit, s.listenerHandler),
@@ -133,11 +170,11 @@ const tagBackoff = gina.TagUserBase
 func (s *Server) listenerInit(l *listener, g *gina.Ctx, _ []byte) gina.Effect {
 	fd, err := g.Listen(gina.ListenSpec{Addr: s.cfg.Addr, Port: s.cfg.Port, ReusePort: s.cfg.ReusePort, Backlog: s.cfg.Backlog})
 	if err != nil {
-		s.listenErr = err
+		s.setListenErr(err)
 		return gina.Crash(gina.FaultInitFailed)
 	}
 	l.fd = fd
-	s.ports[g.ShardID()] = g.LocalPort(fd)
+	s.sh(g).port.Store(uint32(g.LocalPort(fd)))
 	g.IOAccept(fd, 0)
 	return gina.WaitIO()
 }
@@ -155,7 +192,7 @@ func (s *Server) listenerHandler(l *listener, g *gina.Ctx, m *gina.Message) gina
 			_, err := g.Spawn(gina.SpawnSpec{Type: s.cfg.TypeIDBase + 1, Group: gina.GroupNone, Restart: gina.RestartTemporary, HandoffFD: fd})
 			if err != gina.SpawnErrNone {
 				g.CloseFD(fd) // shard is full: shed the connection
-				s.rejected++
+				s.sh(g).rejected.Add(1)
 			}
 		} else {
 			switch syscall.Errno(-res) {
@@ -193,15 +230,17 @@ type connState struct {
 	reqStart   uint64 // ns when the current request's first byte arrived; 0 when idle
 	requests   int
 	closeAfter bool
+	stream     bool        // SSE: the connection only pushes events, it no longer reads requests
+	notify     gina.Handle // SSE: told (TagStreamClosed) when the stream ends
 	req        Request
 	hdrs       [64]Header
 	c          Context
 }
 
-func (s *Server) getBuf(n int) []byte {
-	if k := len(s.bufs); k > 0 {
-		b := s.bufs[k-1]
-		s.bufs = s.bufs[:k-1]
+func (st *shardState) getBuf(n int) []byte {
+	if k := len(st.bufs); k > 0 {
+		b := st.bufs[k-1]
+		st.bufs = st.bufs[:k-1]
 		if cap(b) >= n {
 			return b[:n]
 		}
@@ -209,35 +248,41 @@ func (s *Server) getBuf(n int) []byte {
 	return make([]byte, n)
 }
 
-func (s *Server) putBuf(b []byte) {
-	if b != nil && cap(b) <= 64<<10 && len(s.bufs) < 4*s.cfg.MaxConns {
-		s.bufs = append(s.bufs, b[:cap(b)])
+func (st *shardState) putBuf(b []byte, max int) {
+	if b != nil && cap(b) <= 64<<10 && len(st.bufs) < max {
+		st.bufs = append(st.bufs, b[:cap(b)])
 	}
 }
 
 func (s *Server) connInit(cs *connState, g *gina.Ctx, _ []byte) gina.Effect {
 	cs.fd = g.OwnedFD()
-	cs.rbuf = s.getBuf(s.cfg.ReadBufSize)
-	cs.wbuf = s.getBuf(1024)[:0]
+	st := s.sh(g)
+	cs.rbuf = st.getBuf(s.cfg.ReadBufSize)
+	cs.wbuf = st.getBuf(1024)[:0]
 	if s.cfg.TLS != nil {
 		t, err := gtls.NewServer(s.cfg.TLS)
 		if err != nil {
 			g.CloseFD(cs.fd)
 			return gina.Crash(gina.FaultInitFailed)
 		}
-		cs.tls, cs.cbuf = t, s.getBuf(16<<10)
+		cs.tls, cs.cbuf = t, st.getBuf(16<<10)
 	}
-	s.conns++
+	st.conns.Add(1)
 	return s.recv(cs, g)
 }
 
 func (s *Server) closeConn(cs *connState, g *gina.Ctx) gina.Effect {
+	if cs.stream && cs.notify != 0 {
+		self := g.Self()
+		gina.Send(g, cs.notify, TagStreamClosed, &self)
+	}
 	g.CloseFD(cs.fd)
-	s.putBuf(cs.rbuf)
-	s.putBuf(cs.wbuf)
-	s.putBuf(cs.cbuf)
+	st, keep := s.sh(g), 4*s.cfg.MaxConns
+	st.putBuf(cs.rbuf, keep)
+	st.putBuf(cs.wbuf, keep)
+	st.putBuf(cs.cbuf, keep)
 	cs.rbuf, cs.wbuf, cs.cbuf, cs.tls = nil, nil, nil, nil
-	s.conns--
+	st.conns.Add(-1)
 	return gina.Done()
 }
 
@@ -312,7 +357,16 @@ func (s *Server) connHandler(cs *connState, g *gina.Ctx, m *gina.Message) gina.E
 		if cs.closeAfter || g.IsShuttingDown() {
 			return s.closeConn(cs, g)
 		}
+		if cs.stream {
+			return gina.WaitMessage() // sent; sleep until the next event
+		}
 		return s.process(cs, g)
+	case TagEvent:
+		if !cs.stream || cs.closeAfter {
+			return gina.WaitMessage()
+		}
+		cs.wbuf = appendEvent(cs.wbuf[:0], m.Payload[:m.PayloadSize])
+		return s.sendResponse(cs, g)
 	case gina.TagShutdown:
 		return s.closeConn(cs, g)
 	}
@@ -382,10 +436,14 @@ func (s *Server) process(cs *connState, g *gina.Ctx) gina.Effect {
 	c.tls = cs.tls
 	s.dispatch(c)
 	cs.requests++
-	s.requests++
+	ss := s.sh(g)
+	ss.requests.Add(1)
 	cs.closeAfter = !cs.req.KeepAlive || c.close || g.IsShuttingDown() ||
 		(s.cfg.MaxRequestsPerConn > 0 && cs.requests >= s.cfg.MaxRequestsPerConn)
-	s.buildResponse(cs, cs.req.Method == "HEAD")
+	if c.stream {
+		cs.stream, cs.notify, cs.closeAfter = true, c.notify, g.IsShuttingDown()
+	}
+	s.buildResponse(cs, cs.req.Method == "HEAD", ss)
 	copy(cs.rbuf, cs.rbuf[consumed:cs.rlen]) // keep pipelined bytes, after the response is built
 	cs.rlen -= consumed
 	cs.scanned = 0
@@ -437,21 +495,21 @@ func (s *Server) fail(cs *connState, g *gina.Ctx, code int) gina.Effect {
 	c.String(code, statusText(code)+"\n")
 	cs.closeAfter = true
 	cs.req.Method, cs.req.Minor = "GET", 1
-	s.buildResponse(cs, false)
+	s.buildResponse(cs, false, s.sh(g))
 	return s.sendResponse(cs, g)
 }
 
 const timeFormat = "Mon, 02 Jan 2006 15:04:05 GMT"
 
-func (s *Server) date() []byte {
-	if sec := time.Now().Unix(); sec != s.dateSec {
-		s.dateSec = sec
-		s.dateBuf = time.Unix(sec, 0).UTC().AppendFormat(s.dateBuf[:0], timeFormat)
+func (st *shardState) date() []byte {
+	if sec := time.Now().Unix(); sec != st.dateSec {
+		st.dateSec = sec
+		st.dateBuf = time.Unix(sec, 0).UTC().AppendFormat(st.dateBuf[:0], timeFormat)
 	}
-	return s.dateBuf
+	return st.dateBuf
 }
 
-func (s *Server) buildResponse(cs *connState, head bool) {
+func (s *Server) buildResponse(cs *connState, head bool, st *shardState) {
 	c := &cs.c
 	w := cs.wbuf[:0]
 	w = append(w, "HTTP/1.1 "...)
@@ -459,7 +517,7 @@ func (s *Server) buildResponse(cs *connState, head bool) {
 	w = append(w, ' ')
 	w = append(w, statusText(c.status)...)
 	w = append(w, "\r\nDate: "...)
-	w = append(w, s.date()...)
+	w = append(w, st.date()...)
 	w = append(w, "\r\nServer: gina\r\n"...)
 	allowed := bodyAllowed(c.status)
 	if allowed {
@@ -472,9 +530,13 @@ func (s *Server) buildResponse(cs *connState, head bool) {
 			w = append(w, ct...)
 			w = append(w, "\r\n"...)
 		}
-		w = append(w, "Content-Length: "...)
-		w = strconv.AppendInt(w, int64(len(c.body)), 10)
-		w = append(w, "\r\n"...)
+		if c.stream { // open-ended: the body is delimited by the connection closing
+			w = append(w, "Cache-Control: no-cache\r\n"...)
+		} else {
+			w = append(w, "Content-Length: "...)
+			w = strconv.AppendInt(w, int64(len(c.body)), 10)
+			w = append(w, "\r\n"...)
+		}
 	}
 	w = append(w, c.hdr...)
 	if cs.closeAfter {

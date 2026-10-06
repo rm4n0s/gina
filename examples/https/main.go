@@ -7,9 +7,9 @@
 // Without -cert/-key it creates a throwaway self-signed certificate for localhost,
 // so browsers and curl need -k / --insecure (or to trust it).
 //
-// Both servers live in one gina.System on one thread: an isolate per connection,
-// plus a listener isolate per server. TLS runs inside the connection isolates
-// (extensions/tls), not in goroutines.
+// Both servers live in one gina.System (one shard thread here): an isolate per
+// connection, plus a listener isolate per server. TLS runs inside the connection
+// isolates (extensions/tls).
 package main
 
 import (
@@ -112,5 +112,5 @@ func main() {
 	if *httpPort != 0 {
 		fmt.Printf("HTTP   http://localhost:%d/  (redirects to HTTPS)\n", *httpPort)
 	}
-	sys.RunUntilIdle(1 << 62) // serves until killed
+	sys.Run(gina.RunOptions{}) // serves until killed
 }

@@ -1,6 +1,8 @@
 // Package http is an HTTP/1.1 server framework built on Gina isolates: one
 // listener isolate per shard (SO_REUSEPORT capable) and one isolate per
-// connection. It uses no goroutines, no channels and not net/http.
+// connection. It starts no goroutines of its own and does not use net/http: its
+// state is kept per shard, so it runs unchanged on one thread or on many shard
+// threads.
 //
 // Handlers run synchronously inside the connection isolate's turn and may use
 // Context.Gina() to message other isolates. Request bodies must carry

@@ -12,11 +12,13 @@ const (
 	soReusePort = 15
 )
 
-// ioPoller is the single epoll instance shared by every shard of a System.
-// Events carry (shard, fd-table index) so one wait serves all shards.
+// ioPoller is used only by the single-thread driver (System.Step/RunUntilIdle):
+// a master epoll instance that watches every shard's own epoll fd, so one
+// blocking wait can serve all shards. Threaded shards (System.Start) block in
+// their own epoll instead.
 type ioPoller struct {
-	epfd   int
-	events [256]syscall.EpollEvent
+	master int
+	events [8]syscall.EpollEvent
 }
 
 func (sys *System) initIO() error {
@@ -24,31 +26,28 @@ func (sys *System) initIO() error {
 	if err != nil {
 		return err
 	}
-	sys.iop.epfd = ep
+	sys.iop.master = ep
+	for _, sh := range sys.shards {
+		ev := syscall.EpollEvent{Events: uint32(syscall.EPOLLIN)}
+		if err := syscall.EpollCtl(ep, syscall.EPOLL_CTL_ADD, sh.io.epfd, &ev); err != nil {
+			syscall.Close(ep)
+			return err
+		}
+	}
 	return nil
 }
 
 func (sys *System) closeIO() {
-	if sys.iop.epfd > 0 {
-		syscall.Close(sys.iop.epfd)
-		sys.iop.epfd = 0
+	if sys.iop.master > 0 {
+		syscall.Close(sys.iop.master)
+		sys.iop.master = 0
 	}
 }
 
-// pollIO waits up to timeoutMs (-1 = forever) and dispatches ready sockets to
-// their shard's reactor. It returns the number of events handled.
-func (sys *System) pollIO(timeoutMs int) int {
-	n, err := syscall.EpollWait(sys.iop.epfd, sys.iop.events[:], timeoutMs)
-	if err != nil {
-		return 0 // EINTR
-	}
-	for i := 0; i < n; i++ {
-		ev := &sys.iop.events[i]
-		if sh := int(ev.Pad); sh < len(sys.shards) {
-			sys.shards[sh].io.onEvent(int(ev.Fd))
-		}
-	}
-	return n
+// waitIO blocks up to timeoutMs (-1 = forever) until some shard's epoll has
+// events; the caller then ticks the shards, which poll for them.
+func (sys *System) waitIO(timeoutMs int) {
+	syscall.EpollWait(sys.iop.master, sys.iop.events[:], timeoutMs)
 }
 
 type fdEntry struct {
@@ -76,7 +75,9 @@ type ioOp struct {
 // would block is it parked until epoll reports the socket (edge-triggered).
 type reactor struct {
 	s       *Shard
-	epfd    int
+	epfd    int // this shard's own epoll instance
+	wakefd  int // eventfd other shards write to wake this shard; registered in epfd with Fd=-1
+	events  [64]syscall.EpollEvent
 	fds     []fdEntry
 	freeFDs []int32
 	ops     []ioOp
@@ -86,13 +87,63 @@ type reactor struct {
 	nUndel  int
 }
 
-func newReactor(s *Shard, epfd, maxFDs, maxOps int) *reactor {
-	r := &reactor{s: s, epfd: epfd, fds: make([]fdEntry, maxFDs), ops: make([]ioOp, maxOps)}
+func newReactor(s *Shard, maxFDs, maxOps int) (*reactor, error) {
+	ep, err := syscall.EpollCreate1(syscall.EPOLL_CLOEXEC)
+	if err != nil {
+		return nil, err
+	}
+	efd, _, e := syscall.RawSyscall(syscall.SYS_EVENTFD2, 0, syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if e != 0 {
+		syscall.Close(ep)
+		return nil, e
+	}
+	ev := syscall.EpollEvent{Events: uint32(syscall.EPOLLIN), Fd: -1}
+	if err := syscall.EpollCtl(ep, syscall.EPOLL_CTL_ADD, int(efd), &ev); err != nil {
+		syscall.Close(int(efd))
+		syscall.Close(ep)
+		return nil, err
+	}
+	r := &reactor{s: s, epfd: ep, wakefd: int(efd), fds: make([]fdEntry, maxFDs), ops: make([]ioOp, maxOps)}
 	for i := range r.fds {
 		r.fds[i] = fdEntry{raw: -1, gen: 1, rop: -1, wop: -1}
 	}
 	r.refill()
-	return r
+	return r, nil
+}
+
+// poll waits up to timeoutMs (0 = just check, -1 = forever) and completes the
+// operations of every ready socket. It returns how many sockets it handled.
+func (r *reactor) poll(timeoutMs int) int {
+	n, err := syscall.EpollWait(r.epfd, r.events[:], timeoutMs)
+	if err != nil {
+		return 0 // EINTR
+	}
+	handled := 0
+	for i := 0; i < n; i++ {
+		ev := &r.events[i]
+		if ev.Fd < 0 { // another shard (or Stop) woke us: reset the eventfd
+			var b [8]byte
+			syscall.Read(r.wakefd, b[:])
+			continue
+		}
+		r.onEvent(int(ev.Fd))
+		handled++
+	}
+	return handled
+}
+
+// wake makes a blocked poll return. It is safe to call from any thread.
+func (r *reactor) wake() {
+	one := [8]byte{1}
+	syscall.Write(r.wakefd, one[:])
+}
+
+func (r *reactor) hasUndelivered() bool { return r.nUndel > 0 }
+
+// close releases the epoll instance and the eventfd (reset closes the sockets).
+func (r *reactor) close() {
+	syscall.Close(r.wakefd)
+	syscall.Close(r.epfd)
 }
 
 func (r *reactor) refill() {

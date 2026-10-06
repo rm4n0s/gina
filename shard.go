@@ -2,6 +2,7 @@ package gina
 
 import (
 	"fmt"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -101,11 +102,13 @@ type Shard struct {
 	epoch       uint64
 	live        int
 	shutting    bool
-	quarantined bool
+	quarantined atomic.Bool
+	sleeping    atomic.Uint32 // 1 while the shard's thread is (about to be) blocked waiting for work
+	spin        time.Duration // idle spin before blocking (threaded mode)
 	stats       Stats
 }
 
-func newShard(sys *System, id uint8, spec SystemSpec) *Shard {
+func newShard(sys *System, id uint8, spec SystemSpec) (*Shard, error) {
 	s := &Shard{sys: sys, id: id, spec: spec.Shards[id], reserve: spec.SystemReserve}
 	total := 0
 	for _, d := range spec.Types {
@@ -124,10 +127,14 @@ func newShard(sys *System, id uint8, spec SystemSpec) *Shard {
 	}
 	s.readyBuf = make([]uint32, n)
 	s.timers = newTimerHeap(spec.TimerEntries)
-	s.io = newReactor(s, sys.iop.epfd, spec.MaxFDs, total)
+	io, err := newReactor(s, spec.MaxFDs, total)
+	if err != nil {
+		return nil, err
+	}
+	s.io = io
 	s.groups = newGroups(s.spec.Groups)
 	s.resetBudget = newBudget(spec.ResetMax, spec.ResetWindow)
-	return s
+	return s, nil
 }
 
 func (s *Shard) refillPool() {
@@ -139,7 +146,7 @@ func (s *Shard) refillPool() {
 }
 
 func (s *Shard) Stats() Stats      { return s.stats }
-func (s *Shard) Quarantined() bool { return s.quarantined }
+func (s *Shard) Quarantined() bool { return s.quarantined.Load() }
 func (s *Shard) Live() int         { return s.live }
 
 func (s *Shard) handleOf(t *isoType, slot uint32) Handle {
@@ -283,7 +290,7 @@ func (s *Shard) route(to Handle, m *Message, att any) SendResult {
 		return SendStaleHandle
 	}
 	dst := s.sys.shards[to.Shard()]
-	if dst.quarantined {
+	if dst.quarantined.Load() {
 		return SendStaleHandle
 	}
 	if f := s.sys.faults; f != nil && f.dropRemote(s.id, to.Shard()) {
@@ -302,21 +309,25 @@ func (s *Shard) route(to Handle, m *Message, att any) SendResult {
 // reports whether anything happened.
 func (s *Shard) Tick() bool {
 	s.tick++
-	if s.quarantined {
+	if s.quarantined.Load() {
 		for _, r := range s.in {
 			if r != nil {
-				r.head = r.tail
+				r.discard()
 			}
 		}
 		return false
 	}
+	p := false
+	if s.io.active() > 0 && s.io.poll(0) > 0 { // 0. socket readiness (own epoll, never blocks here)
+		p = true
+	}
 	s.io.flush()
-	p := s.drainInbound()     // 1. cross-shard messages
+	p = s.drainInbound() || p // 1. cross-shard messages
 	p = s.fireTimers() || p   // 2. timers
 	p = s.dispatch() || p     // 3. isolate turns
-	for _, r := range s.out { // 4. publish outbound batches
-		if r != nil {
-			r.publish()
+	for i, r := range s.out { // 4. publish outbound batches, then wake any peer that is asleep
+		if r != nil && r.publish() {
+			s.sys.shards[i].wake()
 		}
 	}
 	return p
@@ -328,16 +339,21 @@ func (s *Shard) drainInbound() bool {
 		if r == nil {
 			continue
 		}
+		got := false
 		for {
 			m, ok := r.peek()
 			if !ok {
 				break
 			}
-			any = true
+			got = true
 			if s.enqueue(m.Dest, m, nil, false) != SendOK {
 				s.stats.Dropped++
 			}
 			r.advance()
+		}
+		if got {
+			r.commit() // one store per ring per tick
+			any = true
 		}
 	}
 	return any
@@ -577,12 +593,12 @@ func (s *Shard) level2Reset() {
 	s.stats.Resets++
 	s.wipe()
 	if s.resetBudget.exceeded(s.tick) {
-		s.quarantined = true
+		s.quarantined.Store(true)
 		s.stats.Quarantines++
 		return
 	}
 	if err := s.bootSpawns(); err != nil {
-		s.quarantined = true
+		s.quarantined.Store(true)
 		s.stats.Quarantines++
 	}
 }
@@ -621,23 +637,37 @@ func (s *Shard) forceStop() int {
 }
 
 func (s *Shard) pending() bool {
-	if s.quarantined {
+	if s.quarantined.Load() {
 		return false
 	}
 	if s.rl > 0 {
 		return true
 	}
 	for _, r := range s.in {
-		if r != nil && r.pending() {
+		if r != nil && r.consumerPending() {
 			return true
 		}
 	}
 	for _, r := range s.out {
-		if r != nil && r.pending() {
+		if r != nil && r.producerPending() {
 			return true
 		}
 	}
 	return false
+}
+
+// hasWork reports whether a Tick would find anything to do. A threaded shard
+// calls it after announcing sleep, so it must read the shared ring cursors.
+func (s *Shard) hasWork() bool { return s.pending() || s.io.hasUndelivered() }
+
+// wake rouses this shard if its thread is blocked waiting for work. Other shards
+// call it after publishing into one of this shard's inbound rings: the store of
+// the ring cursor, then this load of `sleeping`, pairs with the sleeper's store of
+// `sleeping`, then its load of the cursor, so one side always sees the other.
+func (s *Shard) wake() {
+	if s.sleeping.Load() != 0 {
+		s.io.wake()
+	}
 }
 
 // check verifies the shard's structural invariants (pool conservation, mailbox

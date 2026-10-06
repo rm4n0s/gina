@@ -20,12 +20,15 @@ type Context struct {
 	hdr     []byte // extra response headers, "Name: value\r\n" each
 	body    []byte
 	close   bool
+	stream  bool        // EventStream: keep the connection open for pushed events
+	notify  gina.Handle // EventStream: told when the stream ends
 	tls     *gtls.Conn
 }
 
 func (c *Context) reset(g *gina.Ctx, req *Request) {
 	c.Req, c.g, c.nparams, c.tls = req, g, 0, nil
 	c.status, c.ctype, c.close = 200, "", false
+	c.stream, c.notify = false, 0
 	c.hdr, c.body = c.hdr[:0], c.body[:0]
 }
 

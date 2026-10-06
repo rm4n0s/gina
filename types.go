@@ -1,13 +1,18 @@
 // Package gina is a Go port of the Tina concurrency model: isolates (state
 // machines) return effects, run on shards, and talk through fixed-size messages.
 //
-// This MVP runs all shards cooperatively on one thread. The package contains no
-// goroutines and no channels (enforced by cmd/ginalint).
+// Each shard owns its isolates, message pool, timers and sockets and runs on its
+// own OS thread (System.Start), exchanging messages with other shards through
+// lock-free SPSC rings; System.Step drives all shards cooperatively on one thread
+// for tests and deterministic simulation. Goroutines and other concurrency
+// primitives are confined to threads.go (and tests); the rest of the engine is
+// single-threaded per shard.
 package gina
 
 import (
 	"fmt"
 	"reflect"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -193,14 +198,38 @@ func PayloadAs[P any](m *Message) *P {
 // padding-free (so no stale bytes leak), and at most MaxPayload bytes.
 func ValidatePayloadType[P any]() error { return validatePOD(reflect.TypeFor[P](), MaxPayload) }
 
-var podCache = map[reflect.Type]error{} // single-threaded engine: no locking
+type podKey struct {
+	t     reflect.Type
+	limit uintptr
+}
+
+// podCache is copy-on-write so the hot path (Send[P] on many shard threads)
+// reads it without locking. It is keyed by (type, limit): the same type can be
+// valid as a 96-byte payload but not as 64-byte init args.
+var podCache atomic.Pointer[map[podKey]error]
 
 func checkPOD[P any](limit uintptr) {
-	t := reflect.TypeFor[P]()
-	err, seen := podCache[t]
-	if !seen {
-		err = validatePOD(t, limit)
-		podCache[t] = err
+	key := podKey{reflect.TypeFor[P](), limit}
+	if m := podCache.Load(); m != nil {
+		if err, ok := (*m)[key]; ok {
+			if err != nil {
+				panic(err)
+			}
+			return
+		}
+	}
+	err := validatePOD(key.t, limit)
+	for {
+		old := podCache.Load()
+		next := map[podKey]error{key: err}
+		if old != nil {
+			for k, v := range *old {
+				next[k] = v
+			}
+		}
+		if podCache.CompareAndSwap(old, &next) {
+			break
+		}
 	}
 	if err != nil {
 		panic(err)

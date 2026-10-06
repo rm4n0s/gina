@@ -1,186 +1,188 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1196" viewBox="0 0 1800 1196" font-family="system-ui, 'Noto Sans', 'Liberation Sans', sans-serif" role="img" aria-labelledby="t d">
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1214" viewBox="0 0 1800 1214" font-family="system-ui, 'Noto Sans', 'Liberation Sans', sans-serif" role="img" aria-labelledby="t d">
 <title id="t">Gina vs Go net/http benchmark results</title>
-<desc id="d">Six small charts comparing Gina and net/http on 1 to 8 cores: keep-alive throughput over HTTP and HTTPS, TLS handshakes per second, p99 latency, a 64 KiB echo test and memory use. Gina is faster on every measure except memory. The same numbers are tabulated in docs/BENCHMARKS.md.</desc>
-<rect width="1800" height="1196" fill="#fcfcfb"/>
-<text x="56.0" y="62.0" font-size="34" font-weight="700" text-anchor="start" fill="#0b0b0b" >Gina vs Go net/http</text>
-<text x="56.0" y="94.0" font-size="15" font-weight="400" text-anchor="start" fill="#52514e" >Same cores, same routes, same bodies. Loopback HTTP/1.1, 256 connections, median of three 5 s runs per point.</text>
-<text x="56.0" y="116.0" font-size="15" font-weight="400" text-anchor="start" fill="#52514e" >Server pinned to N physical cores; the oha load generator runs on separate cores.</text>
-<circle cx="1539.0" cy="57.0" r="6" fill="#eb6834"/>
-<text x="1553.0" y="62.0" font-size="14" font-weight="400" text-anchor="start" fill="#52514e" >net/http (GOMAXPROCS = N)</text>
-<circle cx="1184.2" cy="57.0" r="6" fill="#2a78d6"/>
-<text x="1198.2" y="62.0" font-size="14" font-weight="400" text-anchor="start" fill="#52514e" >Gina (N worker processes, one thread each)</text>
-<g transform="translate(56.0,150.0)">
-<text x="0.0" y="22.0" font-size="19" font-weight="600" text-anchor="start" fill="#0b0b0b" >Keep-alive GET, HTTP: 1.5–1.8× throughput</text>
-<text x="0.0" y="46.0" font-size="14" font-weight="400" text-anchor="start" fill="#52514e" >Requests per second (thousands) · higher is better</text>
-<line x1="54.0" x2="396.7" y1="384.0" y2="384.0" stroke="#c3c2b7" stroke-width="1"/>
-<text x="44.0" y="388.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >0</text>
-<line x1="54.0" x2="396.7" y1="286.7" y2="286.7" stroke="#e1e0d9" stroke-width="1"/>
-<text x="44.0" y="291.2" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >500</text>
-<line x1="54.0" x2="396.7" y1="189.3" y2="189.3" stroke="#e1e0d9" stroke-width="1"/>
-<text x="44.0" y="193.8" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >1,000</text>
-<line x1="54.0" x2="396.7" y1="92.0" y2="92.0" stroke="#e1e0d9" stroke-width="1"/>
-<text x="44.0" y="96.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >1,500</text>
-<text x="76.0" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e" >1</text>
-<text x="175.6" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e" >2</text>
-<text x="275.1" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e" >4</text>
-<text x="374.7" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e" >8</text>
-<text x="225.3" y="432.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e" >server cores</text>
-<polyline points="76.0,351.2 175.6,312.2 275.1,244.7 374.7,145.4" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-<circle cx="76.0" cy="351.2" r="7" fill="#fcfcfb"/><circle cx="76.0" cy="351.2" r="5" fill="#2a78d6"/>
-<circle cx="175.6" cy="312.2" r="7" fill="#fcfcfb"/><circle cx="175.6" cy="312.2" r="5" fill="#2a78d6"/>
-<circle cx="275.1" cy="244.7" r="7" fill="#fcfcfb"/><circle cx="275.1" cy="244.7" r="5" fill="#2a78d6"/>
-<circle cx="374.7" cy="145.4" r="7" fill="#fcfcfb"/><circle cx="374.7" cy="145.4" r="5" fill="#2a78d6"/>
-<text x="389.7" y="150.4" font-size="14" fill="#52514e">Gina <tspan font-weight="600" fill="#0b0b0b">1,226k</tspan></text>
-<polyline points="76.0,362.3 175.6,345.2 275.1,307.6 374.7,253.5" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-<circle cx="76.0" cy="362.3" r="7" fill="#fcfcfb"/><circle cx="76.0" cy="362.3" r="5" fill="#eb6834"/>
-<circle cx="175.6" cy="345.2" r="7" fill="#fcfcfb"/><circle cx="175.6" cy="345.2" r="5" fill="#eb6834"/>
-<circle cx="275.1" cy="307.6" r="7" fill="#fcfcfb"/><circle cx="275.1" cy="307.6" r="5" fill="#eb6834"/>
-<circle cx="374.7" cy="253.5" r="7" fill="#fcfcfb"/><circle cx="374.7" cy="253.5" r="5" fill="#eb6834"/>
-<text x="389.7" y="258.5" font-size="14" fill="#52514e">net/http <tspan font-weight="600" fill="#0b0b0b">670k</tspan></text>
+<desc id="d">Six small charts comparing Gina (shard threads in one process) with Go net/http on 1 to 8 cores: keep-alive throughput over HTTP and HTTPS, TLS handshakes per second, p99 latency, a 64 KiB echo test and memory use. Gina is faster on every throughput and latency measure; Gina uses about the same memory as net/http on HTTP and about three times as much on HTTPS. The same numbers are tabulated in docs/BENCHMARKS.md.</desc>
+<rect width="1800" height="1214" fill="#fcfcfb"/>
+<text x="56.0" y="62.0" font-size="34" font-weight="700" text-anchor="start" fill="#0b0b0b">Gina vs Go net/http</text>
+<text x="56.0" y="94.0" font-size="15" font-weight="400" text-anchor="start" fill="#52514e">Same cores, same routes, same bodies. Loopback HTTP/1.1, 256 connections, median of two 4 s runs per point.</text>
+<text x="56.0" y="116.0" font-size="15" font-weight="400" text-anchor="start" fill="#52514e">Server pinned to N physical cores; the oha load generator runs on separate cores. Gina: one process, N pinned shard threads (Tina's model).</text>
+<polygon points="1538.5,49.9 1545.6,57.0 1538.5,64.1 1531.4,57.0" fill="#eb6834"/>
+<text x="1553.5" y="62.0" font-size="14" font-weight="400" text-anchor="start" fill="#52514e">net/http (GOMAXPROCS = N)</text>
+<circle cx="1253.6" cy="57.0" r="5" fill="#2a78d6"/>
+<text x="1268.6" y="62.0" font-size="14" font-weight="400" text-anchor="start" fill="#52514e">Gina, shard threads (one process)</text>
+<g transform="translate(56.0,168.0)">
+<text x="0.0" y="22.0" font-size="19" font-weight="600" text-anchor="start" fill="#0b0b0b">Keep-alive GET, HTTP: 1.6–1.9× throughput</text>
+<text x="0.0" y="46.0" font-size="14" font-weight="400" text-anchor="start" fill="#52514e">Requests per second (thousands) · higher is better</text>
+<line x1="54.0" x2="390.7" y1="384.0" y2="384.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="44.0" y="388.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">0</text>
+<line x1="54.0" x2="390.7" y1="286.7" y2="286.7" stroke="#e1e0d9" stroke-width="1"/>
+<text x="44.0" y="291.2" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">500</text>
+<line x1="54.0" x2="390.7" y1="189.3" y2="189.3" stroke="#e1e0d9" stroke-width="1"/>
+<text x="44.0" y="193.8" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">1,000</text>
+<line x1="54.0" x2="390.7" y1="92.0" y2="92.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="44.0" y="96.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">1,500</text>
+<text x="76.0" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">1</text>
+<text x="173.6" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">2</text>
+<text x="271.1" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">4</text>
+<text x="368.7" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">8</text>
+<text x="222.3" y="432.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">server cores</text>
+<polyline points="76.0,362.6 173.6,346.2 271.1,307.5 368.7,258.7" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<polygon points="76.0,352.6 85.9,362.6 76.0,372.5 66.1,362.6" fill="#fcfcfb"/><polygon points="76.0,355.5 83.1,362.6 76.0,369.7 68.9,362.6" fill="#eb6834"/>
+<polygon points="173.6,336.2 183.5,346.2 173.6,356.1 163.6,346.2" fill="#fcfcfb"/><polygon points="173.6,339.1 180.7,346.2 173.6,353.3 166.5,346.2" fill="#eb6834"/>
+<polygon points="271.1,297.6 281.1,307.5 271.1,317.5 261.2,307.5" fill="#fcfcfb"/><polygon points="271.1,300.4 278.2,307.5 271.1,314.6 264.0,307.5" fill="#eb6834"/>
+<polygon points="368.7,248.8 378.6,258.7 368.7,268.6 358.7,258.7" fill="#fcfcfb"/><polygon points="368.7,251.6 375.8,258.7 368.7,265.8 361.6,258.7" fill="#eb6834"/>
+<text x="383.7" y="263.7" font-size="14" fill="#52514e">net/http <tspan font-weight="600" fill="#0b0b0b">644k</tspan></text>
+<polyline points="76.0,350.5 173.6,312.6 271.1,248.6 368.7,148.2" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="76.0" cy="350.5" r="7" fill="#fcfcfb"/><circle cx="76.0" cy="350.5" r="5" fill="#2a78d6"/>
+<circle cx="173.6" cy="312.6" r="7" fill="#fcfcfb"/><circle cx="173.6" cy="312.6" r="5" fill="#2a78d6"/>
+<circle cx="271.1" cy="248.6" r="7" fill="#fcfcfb"/><circle cx="271.1" cy="248.6" r="5" fill="#2a78d6"/>
+<circle cx="368.7" cy="148.2" r="7" fill="#fcfcfb"/><circle cx="368.7" cy="148.2" r="5" fill="#2a78d6"/>
+<text x="383.7" y="153.2" font-size="14" fill="#52514e">Gina <tspan font-weight="600" fill="#0b0b0b">1,211k</tspan></text>
 </g>
-<g transform="translate(634.7,150.0)">
-<text x="0.0" y="22.0" font-size="19" font-weight="600" text-anchor="start" fill="#0b0b0b" >Keep-alive GET, HTTPS: 1.5–1.8× throughput</text>
-<text x="0.0" y="46.0" font-size="14" font-weight="400" text-anchor="start" fill="#52514e" >Requests per second (thousands) · higher is better</text>
-<line x1="54.0" x2="396.7" y1="384.0" y2="384.0" stroke="#c3c2b7" stroke-width="1"/>
-<text x="44.0" y="388.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >0</text>
-<line x1="54.0" x2="396.7" y1="325.6" y2="325.6" stroke="#e1e0d9" stroke-width="1"/>
-<text x="44.0" y="330.1" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >250</text>
-<line x1="54.0" x2="396.7" y1="267.2" y2="267.2" stroke="#e1e0d9" stroke-width="1"/>
-<text x="44.0" y="271.7" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >500</text>
-<line x1="54.0" x2="396.7" y1="208.8" y2="208.8" stroke="#e1e0d9" stroke-width="1"/>
-<text x="44.0" y="213.3" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >750</text>
-<line x1="54.0" x2="396.7" y1="150.4" y2="150.4" stroke="#e1e0d9" stroke-width="1"/>
-<text x="44.0" y="154.9" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >1,000</text>
-<line x1="54.0" x2="396.7" y1="92.0" y2="92.0" stroke="#e1e0d9" stroke-width="1"/>
-<text x="44.0" y="96.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >1,250</text>
-<text x="76.0" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e" >1</text>
-<text x="175.6" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e" >2</text>
-<text x="275.1" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e" >4</text>
-<text x="374.7" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e" >8</text>
-<text x="225.3" y="432.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e" >server cores</text>
-<polyline points="76.0,348.2 175.6,307.9 275.1,245.9 374.7,151.0" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-<circle cx="76.0" cy="348.2" r="7" fill="#fcfcfb"/><circle cx="76.0" cy="348.2" r="5" fill="#2a78d6"/>
-<circle cx="175.6" cy="307.9" r="7" fill="#fcfcfb"/><circle cx="175.6" cy="307.9" r="5" fill="#2a78d6"/>
-<circle cx="275.1" cy="245.9" r="7" fill="#fcfcfb"/><circle cx="275.1" cy="245.9" r="5" fill="#2a78d6"/>
-<circle cx="374.7" cy="151.0" r="7" fill="#fcfcfb"/><circle cx="374.7" cy="151.0" r="5" fill="#2a78d6"/>
-<text x="389.7" y="156.0" font-size="14" fill="#52514e">Gina <tspan font-weight="600" fill="#0b0b0b">997k</tspan></text>
-<polyline points="76.0,360.1 175.6,341.5 275.1,293.9 374.7,230.3" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-<circle cx="76.0" cy="360.1" r="7" fill="#fcfcfb"/><circle cx="76.0" cy="360.1" r="5" fill="#eb6834"/>
-<circle cx="175.6" cy="341.5" r="7" fill="#fcfcfb"/><circle cx="175.6" cy="341.5" r="5" fill="#eb6834"/>
-<circle cx="275.1" cy="293.9" r="7" fill="#fcfcfb"/><circle cx="275.1" cy="293.9" r="5" fill="#eb6834"/>
-<circle cx="374.7" cy="230.3" r="7" fill="#fcfcfb"/><circle cx="374.7" cy="230.3" r="5" fill="#eb6834"/>
-<text x="389.7" y="235.3" font-size="14" fill="#52514e">net/http <tspan font-weight="600" fill="#0b0b0b">658k</tspan></text>
+<g transform="translate(634.7,168.0)">
+<text x="0.0" y="22.0" font-size="19" font-weight="600" text-anchor="start" fill="#0b0b0b">Keep-alive GET, HTTPS: 1.6–1.9× throughput</text>
+<text x="0.0" y="46.0" font-size="14" font-weight="400" text-anchor="start" fill="#52514e">Requests per second (thousands) · higher is better</text>
+<line x1="54.0" x2="390.7" y1="384.0" y2="384.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="44.0" y="388.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">0</text>
+<line x1="54.0" x2="390.7" y1="325.6" y2="325.6" stroke="#e1e0d9" stroke-width="1"/>
+<text x="44.0" y="330.1" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">250</text>
+<line x1="54.0" x2="390.7" y1="267.2" y2="267.2" stroke="#e1e0d9" stroke-width="1"/>
+<text x="44.0" y="271.7" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">500</text>
+<line x1="54.0" x2="390.7" y1="208.8" y2="208.8" stroke="#e1e0d9" stroke-width="1"/>
+<text x="44.0" y="213.3" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">750</text>
+<line x1="54.0" x2="390.7" y1="150.4" y2="150.4" stroke="#e1e0d9" stroke-width="1"/>
+<text x="44.0" y="154.9" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">1,000</text>
+<line x1="54.0" x2="390.7" y1="92.0" y2="92.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="44.0" y="96.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">1,250</text>
+<text x="76.0" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">1</text>
+<text x="173.6" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">2</text>
+<text x="271.1" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">4</text>
+<text x="368.7" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">8</text>
+<text x="222.3" y="432.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">server cores</text>
+<polyline points="76.0,361.2 173.6,342.5 271.1,298.9 368.7,239.5" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<polygon points="76.0,351.3 85.9,361.2 76.0,371.2 66.1,361.2" fill="#fcfcfb"/><polygon points="76.0,354.1 83.1,361.2 76.0,368.3 68.9,361.2" fill="#eb6834"/>
+<polygon points="173.6,332.6 183.5,342.5 173.6,352.5 163.6,342.5" fill="#fcfcfb"/><polygon points="173.6,335.4 180.7,342.5 173.6,349.6 166.5,342.5" fill="#eb6834"/>
+<polygon points="271.1,289.0 281.1,298.9 271.1,308.9 261.2,298.9" fill="#fcfcfb"/><polygon points="271.1,291.8 278.2,298.9 271.1,306.0 264.0,298.9" fill="#eb6834"/>
+<polygon points="368.7,229.5 378.6,239.5 368.7,249.4 358.7,239.5" fill="#fcfcfb"/><polygon points="368.7,232.4 375.8,239.5 368.7,246.6 361.6,239.5" fill="#eb6834"/>
+<text x="383.7" y="244.5" font-size="14" fill="#52514e">net/http <tspan font-weight="600" fill="#0b0b0b">619k</tspan></text>
+<polyline points="76.0,348.3 173.6,307.2 271.1,238.0 368.7,136.2" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="76.0" cy="348.3" r="7" fill="#fcfcfb"/><circle cx="76.0" cy="348.3" r="5" fill="#2a78d6"/>
+<circle cx="173.6" cy="307.2" r="7" fill="#fcfcfb"/><circle cx="173.6" cy="307.2" r="5" fill="#2a78d6"/>
+<circle cx="271.1" cy="238.0" r="7" fill="#fcfcfb"/><circle cx="271.1" cy="238.0" r="5" fill="#2a78d6"/>
+<circle cx="368.7" cy="136.2" r="7" fill="#fcfcfb"/><circle cx="368.7" cy="136.2" r="5" fill="#2a78d6"/>
+<text x="383.7" y="141.2" font-size="14" fill="#52514e">Gina <tspan font-weight="600" fill="#0b0b0b">1,061k</tspan></text>
 </g>
-<g transform="translate(1213.3,150.0)">
-<text x="0.0" y="22.0" font-size="19" font-weight="600" text-anchor="start" fill="#0b0b0b" >TLS handshakes: 1.6–2.7× more per second</text>
-<text x="0.0" y="46.0" font-size="14" font-weight="400" text-anchor="start" fill="#52514e" >New TLS 1.3 connection per request (thousands/s) · higher is better</text>
-<line x1="54.0" x2="396.7" y1="384.0" y2="384.0" stroke="#c3c2b7" stroke-width="1"/>
-<text x="44.0" y="388.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >0</text>
-<line x1="54.0" x2="396.7" y1="286.7" y2="286.7" stroke="#e1e0d9" stroke-width="1"/>
-<text x="44.0" y="291.2" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >20</text>
-<line x1="54.0" x2="396.7" y1="189.3" y2="189.3" stroke="#e1e0d9" stroke-width="1"/>
-<text x="44.0" y="193.8" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >40</text>
-<line x1="54.0" x2="396.7" y1="92.0" y2="92.0" stroke="#e1e0d9" stroke-width="1"/>
-<text x="44.0" y="96.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >60</text>
-<text x="76.0" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e" >1</text>
-<text x="175.6" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e" >2</text>
-<text x="275.1" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e" >4</text>
-<text x="374.7" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e" >8</text>
-<text x="225.3" y="432.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e" >server cores</text>
-<polyline points="76.0,342.4 175.6,303.3 275.1,241.9 374.7,148.7" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-<circle cx="76.0" cy="342.4" r="7" fill="#fcfcfb"/><circle cx="76.0" cy="342.4" r="5" fill="#2a78d6"/>
-<circle cx="175.6" cy="303.3" r="7" fill="#fcfcfb"/><circle cx="175.6" cy="303.3" r="5" fill="#2a78d6"/>
-<circle cx="275.1" cy="241.9" r="7" fill="#fcfcfb"/><circle cx="275.1" cy="241.9" r="5" fill="#2a78d6"/>
-<circle cx="374.7" cy="148.7" r="7" fill="#fcfcfb"/><circle cx="374.7" cy="148.7" r="5" fill="#2a78d6"/>
-<text x="389.7" y="153.7" font-size="14" fill="#52514e">Gina <tspan font-weight="600" fill="#0b0b0b">48.4k</tspan></text>
-<polyline points="76.0,358.3 175.6,337.9 275.1,313.0 374.7,295.8" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-<circle cx="76.0" cy="358.3" r="7" fill="#fcfcfb"/><circle cx="76.0" cy="358.3" r="5" fill="#eb6834"/>
-<circle cx="175.6" cy="337.9" r="7" fill="#fcfcfb"/><circle cx="175.6" cy="337.9" r="5" fill="#eb6834"/>
-<circle cx="275.1" cy="313.0" r="7" fill="#fcfcfb"/><circle cx="275.1" cy="313.0" r="5" fill="#eb6834"/>
-<circle cx="374.7" cy="295.8" r="7" fill="#fcfcfb"/><circle cx="374.7" cy="295.8" r="5" fill="#eb6834"/>
-<text x="389.7" y="300.8" font-size="14" fill="#52514e">net/http <tspan font-weight="600" fill="#0b0b0b">18.1k</tspan></text>
+<g transform="translate(1213.3,168.0)">
+<text x="0.0" y="22.0" font-size="19" font-weight="600" text-anchor="start" fill="#0b0b0b">TLS handshakes: 1.7–2.9× more per second</text>
+<text x="0.0" y="46.0" font-size="14" font-weight="400" text-anchor="start" fill="#52514e">New TLS 1.3 connection per request (thousands/s) · higher is better</text>
+<line x1="54.0" x2="390.7" y1="384.0" y2="384.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="44.0" y="388.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">0</text>
+<line x1="54.0" x2="390.7" y1="286.7" y2="286.7" stroke="#e1e0d9" stroke-width="1"/>
+<text x="44.0" y="291.2" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">20</text>
+<line x1="54.0" x2="390.7" y1="189.3" y2="189.3" stroke="#e1e0d9" stroke-width="1"/>
+<text x="44.0" y="193.8" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">40</text>
+<line x1="54.0" x2="390.7" y1="92.0" y2="92.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="44.0" y="96.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">60</text>
+<text x="76.0" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">1</text>
+<text x="173.6" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">2</text>
+<text x="271.1" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">4</text>
+<text x="368.7" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">8</text>
+<text x="222.3" y="432.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">server cores</text>
+<polyline points="76.0,358.7 173.6,338.7 271.1,316.3 368.7,299.2" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<polygon points="76.0,348.8 85.9,358.7 76.0,368.7 66.1,358.7" fill="#fcfcfb"/><polygon points="76.0,351.6 83.1,358.7 76.0,365.8 68.9,358.7" fill="#eb6834"/>
+<polygon points="173.6,328.7 183.5,338.7 173.6,348.6 163.6,338.7" fill="#fcfcfb"/><polygon points="173.6,331.6 180.7,338.7 173.6,345.8 166.5,338.7" fill="#eb6834"/>
+<polygon points="271.1,306.4 281.1,316.3 271.1,326.2 261.2,316.3" fill="#fcfcfb"/><polygon points="271.1,309.2 278.2,316.3 271.1,323.4 264.0,316.3" fill="#eb6834"/>
+<polygon points="368.7,289.3 378.6,299.2 368.7,309.1 358.7,299.2" fill="#fcfcfb"/><polygon points="368.7,292.1 375.8,299.2 368.7,306.3 361.6,299.2" fill="#eb6834"/>
+<text x="383.7" y="304.2" font-size="14" fill="#52514e">net/http <tspan font-weight="600" fill="#0b0b0b">17.4k</tspan></text>
+<polyline points="76.0,341.6 173.6,303.2 271.1,233.0 368.7,139.0" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="76.0" cy="341.6" r="7" fill="#fcfcfb"/><circle cx="76.0" cy="341.6" r="5" fill="#2a78d6"/>
+<circle cx="173.6" cy="303.2" r="7" fill="#fcfcfb"/><circle cx="173.6" cy="303.2" r="5" fill="#2a78d6"/>
+<circle cx="271.1" cy="233.0" r="7" fill="#fcfcfb"/><circle cx="271.1" cy="233.0" r="5" fill="#2a78d6"/>
+<circle cx="368.7" cy="139.0" r="7" fill="#fcfcfb"/><circle cx="368.7" cy="139.0" r="5" fill="#2a78d6"/>
+<text x="383.7" y="144.0" font-size="14" fill="#52514e">Gina <tspan font-weight="600" fill="#0b0b0b">50.3k</tspan></text>
 </g>
-<g transform="translate(56.0,638.0)">
-<text x="0.0" y="22.0" font-size="19" font-weight="600" text-anchor="start" fill="#0b0b0b" >p99 latency, HTTP: 2.8–5.3× lower</text>
-<text x="0.0" y="46.0" font-size="14" font-weight="400" text-anchor="start" fill="#52514e" >Keep-alive GET, milliseconds · lower is better</text>
-<line x1="54.0" x2="396.7" y1="384.0" y2="384.0" stroke="#c3c2b7" stroke-width="1"/>
-<text x="44.0" y="388.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >0</text>
-<line x1="54.0" x2="396.7" y1="286.7" y2="286.7" stroke="#e1e0d9" stroke-width="1"/>
-<text x="44.0" y="291.2" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >2</text>
-<line x1="54.0" x2="396.7" y1="189.3" y2="189.3" stroke="#e1e0d9" stroke-width="1"/>
-<text x="44.0" y="193.8" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >4</text>
-<line x1="54.0" x2="396.7" y1="92.0" y2="92.0" stroke="#e1e0d9" stroke-width="1"/>
-<text x="44.0" y="96.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >6</text>
-<text x="76.0" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e" >1</text>
-<text x="175.6" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e" >2</text>
-<text x="275.1" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e" >4</text>
-<text x="374.7" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e" >8</text>
-<text x="225.3" y="432.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e" >server cores</text>
-<polyline points="76.0,304.0 175.6,344.9 275.1,360.0 374.7,366.5" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-<circle cx="76.0" cy="304.0" r="7" fill="#fcfcfb"/><circle cx="76.0" cy="304.0" r="5" fill="#2a78d6"/>
-<circle cx="175.6" cy="344.9" r="7" fill="#fcfcfb"/><circle cx="175.6" cy="344.9" r="5" fill="#2a78d6"/>
-<circle cx="275.1" cy="360.0" r="7" fill="#fcfcfb"/><circle cx="275.1" cy="360.0" r="5" fill="#2a78d6"/>
-<circle cx="374.7" cy="366.5" r="7" fill="#fcfcfb"/><circle cx="374.7" cy="366.5" r="5" fill="#2a78d6"/>
-<text x="389.7" y="371.5" font-size="14" fill="#52514e">Gina <tspan font-weight="600" fill="#0b0b0b">0.36 ms</tspan></text>
-<polyline points="76.0,159.7 175.6,177.6 275.1,262.5 374.7,292.8" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-<circle cx="76.0" cy="159.7" r="7" fill="#fcfcfb"/><circle cx="76.0" cy="159.7" r="5" fill="#eb6834"/>
-<circle cx="175.6" cy="177.6" r="7" fill="#fcfcfb"/><circle cx="175.6" cy="177.6" r="5" fill="#eb6834"/>
-<circle cx="275.1" cy="262.5" r="7" fill="#fcfcfb"/><circle cx="275.1" cy="262.5" r="5" fill="#eb6834"/>
-<circle cx="374.7" cy="292.8" r="7" fill="#fcfcfb"/><circle cx="374.7" cy="292.8" r="5" fill="#eb6834"/>
-<text x="389.7" y="297.8" font-size="14" fill="#52514e">net/http <tspan font-weight="600" fill="#0b0b0b">1.87 ms</tspan></text>
+<g transform="translate(56.0,656.0)">
+<text x="0.0" y="22.0" font-size="19" font-weight="600" text-anchor="start" fill="#0b0b0b">p99 latency, HTTP: 2.6–5.6× lower</text>
+<text x="0.0" y="46.0" font-size="14" font-weight="400" text-anchor="start" fill="#52514e">Keep-alive GET, milliseconds · lower is better</text>
+<line x1="54.0" x2="390.7" y1="384.0" y2="384.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="44.0" y="388.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">0</text>
+<line x1="54.0" x2="390.7" y1="286.7" y2="286.7" stroke="#e1e0d9" stroke-width="1"/>
+<text x="44.0" y="291.2" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">2</text>
+<line x1="54.0" x2="390.7" y1="189.3" y2="189.3" stroke="#e1e0d9" stroke-width="1"/>
+<text x="44.0" y="193.8" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">4</text>
+<line x1="54.0" x2="390.7" y1="92.0" y2="92.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="44.0" y="96.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">6</text>
+<text x="76.0" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">1</text>
+<text x="173.6" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">2</text>
+<text x="271.1" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">4</text>
+<text x="368.7" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">8</text>
+<text x="222.3" y="432.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">server cores</text>
+<polyline points="76.0,157.8 173.6,170.6 271.1,263.8 368.7,288.9" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<polygon points="76.0,147.9 85.9,157.8 76.0,167.7 66.1,157.8" fill="#fcfcfb"/><polygon points="76.0,150.7 83.1,157.8 76.0,164.9 68.9,157.8" fill="#eb6834"/>
+<polygon points="173.6,160.7 183.5,170.6 173.6,180.6 163.6,170.6" fill="#fcfcfb"/><polygon points="173.6,163.5 180.7,170.6 173.6,177.7 166.5,170.6" fill="#eb6834"/>
+<polygon points="271.1,253.9 281.1,263.8 271.1,273.8 261.2,263.8" fill="#fcfcfb"/><polygon points="271.1,256.7 278.2,263.8 271.1,270.9 264.0,263.8" fill="#eb6834"/>
+<polygon points="368.7,278.9 378.6,288.9 368.7,298.8 358.7,288.9" fill="#fcfcfb"/><polygon points="368.7,281.8 375.8,288.9 368.7,296.0 361.6,288.9" fill="#eb6834"/>
+<text x="383.7" y="293.9" font-size="14" fill="#52514e">net/http <tspan font-weight="600" fill="#0b0b0b">1.95 ms</tspan></text>
+<polyline points="76.0,297.2 173.6,341.6 271.1,360.4 368.7,366.9" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="76.0" cy="297.2" r="7" fill="#fcfcfb"/><circle cx="76.0" cy="297.2" r="5" fill="#2a78d6"/>
+<circle cx="173.6" cy="341.6" r="7" fill="#fcfcfb"/><circle cx="173.6" cy="341.6" r="5" fill="#2a78d6"/>
+<circle cx="271.1" cy="360.4" r="7" fill="#fcfcfb"/><circle cx="271.1" cy="360.4" r="5" fill="#2a78d6"/>
+<circle cx="368.7" cy="366.9" r="7" fill="#fcfcfb"/><circle cx="368.7" cy="366.9" r="5" fill="#2a78d6"/>
+<text x="383.7" y="371.9" font-size="14" fill="#52514e">Gina <tspan font-weight="600" fill="#0b0b0b">0.35 ms</tspan></text>
 </g>
-<g transform="translate(634.7,638.0)">
-<text x="0.0" y="22.0" font-size="19" font-weight="600" text-anchor="start" fill="#0b0b0b" >64 KiB echo, 4 cores: 3.8× HTTP, 1.9× HTTPS</text>
-<text x="0.0" y="46.0" font-size="14" font-weight="400" text-anchor="start" fill="#52514e" >POST /echo, requests per second (thousands) · higher is better</text>
+<g transform="translate(634.7,656.0)">
+<text x="0.0" y="22.0" font-size="19" font-weight="600" text-anchor="start" fill="#0b0b0b">64 KiB echo, 4 cores: 4.0× HTTP, 2.2× HTTPS</text>
+<text x="0.0" y="46.0" font-size="14" font-weight="400" text-anchor="start" fill="#52514e">POST /echo, requests per second (thousands) · higher is better</text>
 <line x1="54.0" x2="510.7" y1="384.0" y2="384.0" stroke="#c3c2b7" stroke-width="1"/>
-<text x="44.0" y="388.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >0</text>
-<line x1="54.0" x2="510.7" y1="311.0" y2="311.0" stroke="#e1e0d9" stroke-width="1"/>
-<text x="44.0" y="315.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >50</text>
-<line x1="54.0" x2="510.7" y1="238.0" y2="238.0" stroke="#e1e0d9" stroke-width="1"/>
-<text x="44.0" y="242.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >100</text>
-<line x1="54.0" x2="510.7" y1="165.0" y2="165.0" stroke="#e1e0d9" stroke-width="1"/>
-<text x="44.0" y="169.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >150</text>
+<text x="44.0" y="388.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">0</text>
+<line x1="54.0" x2="510.7" y1="325.6" y2="325.6" stroke="#e1e0d9" stroke-width="1"/>
+<text x="44.0" y="330.1" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">50</text>
+<line x1="54.0" x2="510.7" y1="267.2" y2="267.2" stroke="#e1e0d9" stroke-width="1"/>
+<text x="44.0" y="271.7" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">100</text>
+<line x1="54.0" x2="510.7" y1="208.8" y2="208.8" stroke="#e1e0d9" stroke-width="1"/>
+<text x="44.0" y="213.3" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">150</text>
+<line x1="54.0" x2="510.7" y1="150.4" y2="150.4" stroke="#e1e0d9" stroke-width="1"/>
+<text x="44.0" y="154.9" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">200</text>
 <line x1="54.0" x2="510.7" y1="92.0" y2="92.0" stroke="#e1e0d9" stroke-width="1"/>
-<text x="44.0" y="96.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >200</text>
-<path d="M143.2,384.0 V117.2 A4,4 0 0 1 147.2,113.2 H163.2 A4,4 0 0 1 167.2,117.2 V384.0 Z" fill="#2a78d6"/>
-<text x="155.2" y="105.2" font-size="14" font-weight="600" text-anchor="middle" fill="#0b0b0b" >185k</text>
-<path d="M169.2,384.0 V317.1 A4,4 0 0 1 173.2,313.1 H189.2 A4,4 0 0 1 193.2,317.1 V384.0 Z" fill="#eb6834"/>
-<text x="181.2" y="305.1" font-size="14" font-weight="600" text-anchor="middle" fill="#0b0b0b" >49k</text>
-<text x="168.2" y="408.0" font-size="14" font-weight="500" text-anchor="middle" fill="#0b0b0b" >HTTP</text>
-<text x="168.2" y="428.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e" >Gina 3.8× faster</text>
-<path d="M371.5,384.0 V279.7 A4,4 0 0 1 375.5,275.7 H391.5 A4,4 0 0 1 395.5,279.7 V384.0 Z" fill="#2a78d6"/>
-<text x="383.5" y="267.7" font-size="14" font-weight="600" text-anchor="middle" fill="#0b0b0b" >74k</text>
-<path d="M397.5,384.0 V330.9 A4,4 0 0 1 401.5,326.9 H417.5 A4,4 0 0 1 421.5,330.9 V384.0 Z" fill="#eb6834"/>
-<text x="409.5" y="318.9" font-size="14" font-weight="600" text-anchor="middle" fill="#0b0b0b" >39k</text>
-<text x="396.5" y="408.0" font-size="14" font-weight="500" text-anchor="middle" fill="#0b0b0b" >HTTPS (TLS 1.3)</text>
-<text x="396.5" y="428.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e" >Gina 1.9× faster</text>
+<text x="44.0" y="96.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">250</text>
+<path d="M137.2,384.0 V136.2 A4,4 0 0 1 141.2,132.2 H155.2 A4,4 0 0 1 159.2,136.2 V384.0 Z" fill="#2a78d6"/>
+<text x="148.2" y="124.2" font-size="13" font-weight="600" text-anchor="middle" fill="#0b0b0b">216k</text>
+<path d="M177.2,384.0 V325.2 A4,4 0 0 1 181.2,321.2 H195.2 A4,4 0 0 1 199.2,325.2 V384.0 Z" fill="#eb6834"/>
+<text x="188.2" y="313.2" font-size="13" font-weight="600" text-anchor="middle" fill="#0b0b0b">54k</text>
+<text x="168.2" y="408.0" font-size="14" font-weight="500" text-anchor="middle" fill="#0b0b0b">HTTP</text>
+<text x="168.2" y="428.0" font-size="12" font-weight="400" text-anchor="middle" fill="#52514e">Gina 4.0× net/http</text>
+<path d="M365.5,384.0 V293.3 A4,4 0 0 1 369.5,289.3 H383.5 A4,4 0 0 1 387.5,293.3 V384.0 Z" fill="#2a78d6"/>
+<text x="376.5" y="281.3" font-size="13" font-weight="600" text-anchor="middle" fill="#0b0b0b">81k</text>
+<path d="M405.5,384.0 V344.2 A4,4 0 0 1 409.5,340.2 H423.5 A4,4 0 0 1 427.5,344.2 V384.0 Z" fill="#eb6834"/>
+<text x="416.5" y="332.2" font-size="13" font-weight="600" text-anchor="middle" fill="#0b0b0b">37k</text>
+<text x="396.5" y="408.0" font-size="14" font-weight="500" text-anchor="middle" fill="#0b0b0b">HTTPS (TLS 1.3)</text>
+<text x="396.5" y="428.0" font-size="12" font-weight="400" text-anchor="middle" fill="#52514e">Gina 2.2× net/http</text>
 </g>
-<g transform="translate(1213.3,638.0)">
-<text x="0.0" y="22.0" font-size="19" font-weight="600" text-anchor="start" fill="#0b0b0b" >Memory at 8 cores: Gina uses 4–8× more</text>
-<text x="0.0" y="46.0" font-size="14" font-weight="400" text-anchor="start" fill="#52514e" >Resident memory, all server processes (MB) · lower is better</text>
+<g transform="translate(1213.3,656.0)">
+<text x="0.0" y="22.0" font-size="19" font-weight="600" text-anchor="start" fill="#0b0b0b">Memory at 8 cores: 1.1–3.0× net/http</text>
+<text x="0.0" y="46.0" font-size="14" font-weight="400" text-anchor="start" fill="#52514e">Resident memory of the server process (MB) · lower is better</text>
 <line x1="54.0" x2="510.7" y1="384.0" y2="384.0" stroke="#c3c2b7" stroke-width="1"/>
-<text x="44.0" y="388.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >0</text>
+<text x="44.0" y="388.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">0</text>
 <line x1="54.0" x2="510.7" y1="311.0" y2="311.0" stroke="#e1e0d9" stroke-width="1"/>
-<text x="44.0" y="315.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >50</text>
+<text x="44.0" y="315.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">50</text>
 <line x1="54.0" x2="510.7" y1="238.0" y2="238.0" stroke="#e1e0d9" stroke-width="1"/>
-<text x="44.0" y="242.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >100</text>
+<text x="44.0" y="242.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">100</text>
 <line x1="54.0" x2="510.7" y1="165.0" y2="165.0" stroke="#e1e0d9" stroke-width="1"/>
-<text x="44.0" y="169.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >150</text>
+<text x="44.0" y="169.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">150</text>
 <line x1="54.0" x2="510.7" y1="92.0" y2="92.0" stroke="#e1e0d9" stroke-width="1"/>
-<text x="44.0" y="96.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e" >200</text>
-<path d="M143.2,384.0 V281.4 A4,4 0 0 1 147.2,277.4 H163.2 A4,4 0 0 1 167.2,281.4 V384.0 Z" fill="#2a78d6"/>
-<text x="155.2" y="269.4" font-size="14" font-weight="600" text-anchor="middle" fill="#0b0b0b" >73</text>
-<path d="M169.2,384.0 V361.7 A4,4 0 0 1 173.2,357.7 H189.2 A4,4 0 0 1 193.2,361.7 V384.0 Z" fill="#eb6834"/>
-<text x="181.2" y="349.7" font-size="14" font-weight="600" text-anchor="middle" fill="#0b0b0b" >18</text>
-<text x="168.2" y="408.0" font-size="14" font-weight="500" text-anchor="middle" fill="#0b0b0b" >HTTP</text>
-<text x="168.2" y="428.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e" >Gina 4.1× more</text>
-<path d="M371.5,384.0 V157.3 A4,4 0 0 1 375.5,153.3 H391.5 A4,4 0 0 1 395.5,157.3 V384.0 Z" fill="#2a78d6"/>
-<text x="383.5" y="145.3" font-size="14" font-weight="600" text-anchor="middle" fill="#0b0b0b" >158</text>
-<path d="M397.5,384.0 V357.3 A4,4 0 0 1 401.5,353.3 H417.5 A4,4 0 0 1 421.5,357.3 V384.0 Z" fill="#eb6834"/>
-<text x="409.5" y="345.3" font-size="14" font-weight="600" text-anchor="middle" fill="#0b0b0b" >21</text>
-<text x="396.5" y="408.0" font-size="14" font-weight="500" text-anchor="middle" fill="#0b0b0b" >HTTPS (TLS 1.3)</text>
-<text x="396.5" y="428.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e" >Gina 7.5× more</text>
+<text x="44.0" y="96.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">200</text>
+<path d="M137.2,384.0 V357.3 A4,4 0 0 1 141.2,353.3 H155.2 A4,4 0 0 1 159.2,357.3 V384.0 Z" fill="#2a78d6"/>
+<text x="148.2" y="345.3" font-size="13" font-weight="600" text-anchor="middle" fill="#0b0b0b">21</text>
+<path d="M177.2,384.0 V360.3 A4,4 0 0 1 181.2,356.3 H195.2 A4,4 0 0 1 199.2,360.3 V384.0 Z" fill="#eb6834"/>
+<text x="188.2" y="348.3" font-size="13" font-weight="600" text-anchor="middle" fill="#0b0b0b">19</text>
+<text x="168.2" y="408.0" font-size="14" font-weight="500" text-anchor="middle" fill="#0b0b0b">HTTP</text>
+<text x="168.2" y="428.0" font-size="12" font-weight="400" text-anchor="middle" fill="#52514e">Gina 1.1× net/http</text>
+<path d="M365.5,384.0 V277.0 A4,4 0 0 1 369.5,273.0 H383.5 A4,4 0 0 1 387.5,277.0 V384.0 Z" fill="#2a78d6"/>
+<text x="376.5" y="265.0" font-size="13" font-weight="600" text-anchor="middle" fill="#0b0b0b">76</text>
+<path d="M405.5,384.0 V351.5 A4,4 0 0 1 409.5,347.5 H423.5 A4,4 0 0 1 427.5,351.5 V384.0 Z" fill="#eb6834"/>
+<text x="416.5" y="339.5" font-size="13" font-weight="600" text-anchor="middle" fill="#0b0b0b">25</text>
+<text x="396.5" y="408.0" font-size="14" font-weight="500" text-anchor="middle" fill="#0b0b0b">HTTPS (TLS 1.3)</text>
+<text x="396.5" y="428.0" font-size="12" font-weight="400" text-anchor="middle" fill="#52514e">Gina 3.0× net/http</text>
 </g>
-<text x="56.0" y="1140.0" font-size="13" font-weight="400" text-anchor="start" fill="#52514e" >Not a feature-equal comparison: net/http is a complete, hardened server; Gina's HTTP is minimal and its TLS 1.3 is unaudited (no resumption, no ChaCha20).</text>
-<text x="56.0" y="1160.0" font-size="13" font-weight="400" text-anchor="start" fill="#52514e" >Gina scales with N shared-nothing processes, net/http with one multi-threaded process. One machine (AMD Ryzen AI MAX+ 395), Go 1.26, oha 1.16, 2026-10-06. Tables and caveats: docs/BENCHMARKS.md.</text>
+<text x="56.0" y="1158.0" font-size="13" font-weight="400" text-anchor="start" fill="#52514e">Not a feature-equal comparison: net/http is a complete, hardened server; Gina's HTTP is minimal and its TLS 1.3 is unaudited (no resumption, no ChaCha20).</text>
+<text x="56.0" y="1178.0" font-size="13" font-weight="400" text-anchor="start" fill="#52514e">Shard threads share one Go heap and GC. One machine (AMD Ryzen AI MAX+ 395), Go 1.26, oha 1.16, 2026-10-07. Tables and caveats: docs/BENCHMARKS.md.</text>
 </svg>

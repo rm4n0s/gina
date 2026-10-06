@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Gina vs net/http: throughput, latency and memory on one machine.
+#   gina    = ONE process, N shard threads pinned to cores (Tina's model)
+#   nethttp = Go net/http, GOMAXPROCS=N
 #
 #   bench/run.sh                      # full matrix (about 10 minutes)
 #   DURATION=2 RUNS=1 CORES="1 2" SCENARIOS=get bench/run.sh    # quick look
@@ -27,12 +29,8 @@ head -c 65536 /dev/urandom > "$BIN/body64k.bin"
 echo "scenario,server,tls,cores,run,rps,p50_ms,p99_ms,p999_ms,success,errors,rss_mb" > "$OUT"
 port=21000
 
-rss_mb() { # sum RSS of a process and its children
-  local total=0 p
-  for p in "$1" $(pgrep -P "$1"); do
-    total=$((total + $(awk '/VmRSS/ {print $2}' /proc/$p/status 2>/dev/null || echo 0)))
-  done
-  echo $((total / 1024))
+rss_mb() { # RSS of the server process
+  echo $(( $(awk '/VmRSS/ {print $2}' /proc/$1/status 2>/dev/null || echo 0) / 1024 ))
 }
 
 one() { # scenario server tls cores
@@ -41,8 +39,7 @@ one() { # scenario server tls cores
   local cpus="0-$((cores - 1))" scheme=http tlsflag="" ohaflags="--insecure --http-version 1.1" url path=/hello/bench
   [ "$tls" = tls ] && scheme=https && tlsflag="-tls"
   case $server in
-    gina)    local w=""; [ "$cores" -gt 1 ] && w="-workers $cores"
-             taskset -c "$cpus" "$BIN/gina" -port $port $w $tlsflag >/dev/null 2>&1 & ;;
+    gina)    taskset -c "$cpus" "$BIN/gina" -port $port -shards $cores -pin $tlsflag >/dev/null 2>&1 & ;; # ONE process, N shard threads
     nethttp) GOMAXPROCS=$cores taskset -c "$cpus" "$BIN/nethttp" -port $port $tlsflag >/dev/null 2>&1 & ;;
   esac
   local pid=$!
@@ -68,7 +65,6 @@ print('$scenario,$server,$tls,$cores,$r,%.0f,%.3f,%.3f,%.3f,%.4f,%d,RSS' % (s['r
       sed "s/RSS/$(rss_mb "$pid")/" >> "$OUT"
   done
   kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
-  pkill -9 -P "$pid" 2>/dev/null
   tail -n "$RUNS" "$OUT" | awk -F, -v s="$scenario" -v v="$server" -v t="$tls" -v c="$cores" '{r[NR]=$6; l[NR]=$8; f+=$11} END {printf "  %-8s %-8s %-5s cores=%d  req/s=%s  p99=%sms  failed=%d\n", s, v, t, c, r[int((NR+1)/2)], l[int((NR+1)/2)], f}'
   sleep 0.5
 }

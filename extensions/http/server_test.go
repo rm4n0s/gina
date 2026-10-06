@@ -1,3 +1,5 @@
+//go:build linux
+
 package http_test
 
 import (
@@ -33,6 +35,13 @@ func routes() *ghttp.Router {
 			c.String(200, "tls sni="+i.ServerName+" alpn="+i.ALPN+" cipher="+i.CipherName())
 		} else {
 			c.String(200, "plain")
+		}
+	})
+	r.GET("/sse", func(c *ghttp.Context) {
+		c.WriteString("retry: 100\n\n")
+		if conn := c.EventStream(0); conn != 0 {
+			ghttp.SendEvent(c.Gina(), conn, "hello\nworld")
+			ghttp.SendEvent(c.Gina(), conn, "again")
 		}
 	})
 	r.GET("/shard", func(c *ghttp.Context) { c.String(200, strconv.Itoa(int(c.Gina().ShardID()))) })
@@ -420,7 +429,7 @@ func TestReusePortSharedAcrossShardsAndSystems(t *testing.T) {
 			t.Fatalf("shard %d bound port %d, want %d", i, h.srv.Port(i), port)
 		}
 	}
-	// a second System (what a Prefork worker is) can bind the very same port
+	// a second System can bind the very same port
 	h2 := start(t, cfg, 1)
 	if h2.srv.Port(0) != port {
 		t.Fatal("second system did not bind the shared port")
