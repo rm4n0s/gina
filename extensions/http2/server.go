@@ -12,9 +12,10 @@
 //     connection by sending the HTTP/2 preface directly. The h2c Upgrade
 //     mechanism of RFC 7540 §3.2 was removed from the protocol and is not supported.
 //
-// A port serves HTTP/2 only. A client that offers no "h2" ALPN protocol fails the
-// handshake, and a plain-text connection that does not start with the preface is
-// closed. Run extensions/http on another port if you need HTTP/1.1.
+// By default a port serves HTTP/2 only: a client that offers no "h2" ALPN
+// protocol fails the handshake, and a plain-text connection that does not start
+// with the preface is closed. Set Config.HTTP1Fallback to serve HTTP/1.1 on the
+// same port (ALPN, or the first bytes without TLS, decide).
 //
 // Implemented: all frame types and flow control in both directions, HPACK with
 // Huffman strings, SETTINGS negotiation, PING, GOAWAY, RST_STREAM, CONTINUATION
@@ -41,22 +42,24 @@ package http2
 
 import (
 	"errors"
+	"net/netip"
 	"sync/atomic"
 	"syscall"
 	"time"
 
-	"gina"
-	ghttp "gina/extensions/http"
-	gtls "gina/extensions/tls"
+	"github.com/rm4n0s/gina"
+	ghttp "github.com/rm4n0s/gina/extensions/http"
+	gtls "github.com/rm4n0s/gina/extensions/tls"
 )
 
 // Config configures a Server. Zero values take the documented defaults; for the
 // timeouts a negative value disables the timeout.
 type Config struct {
-	Addr      [4]byte // default 0.0.0.0
-	Port      uint16  // 0 = ephemeral (each shard gets its own; read with Port())
-	ReusePort bool    // SO_REUSEPORT: every shard binds the same port
-	Backlog   int     // default 1024
+	Addr      [4]byte    // default 0.0.0.0
+	IP        netip.Addr // when valid, overrides Addr: an IPv6 address (or "::", dual-stack) listens on IPv6
+	Port      uint16     // 0 = ephemeral (each shard gets its own; read with Port())
+	ReusePort bool       // SO_REUSEPORT: every shard binds the same port
+	Backlog   int        // default 1024
 
 	MaxConns             int // per shard (default 1024); further connections are accepted and closed
 	MaxConcurrentStreams int // per connection (default 100); more are refused with REFUSED_STREAM
@@ -84,8 +87,21 @@ type Config struct {
 	WriteTimeout time.Duration // a send, or a response blocked on the peer's flow-control window (default 10s)
 
 	// TLS, when set, serves h2 over TLS 1.3 (see gina/extensions/tls). The config is
-	// copied and its ALPN list forced to "h2". Nil serves h2c with prior knowledge.
+	// copied and its ALPN list forced to "h2" (plus "http/1.1" with HTTP1Fallback).
+	// Certificates can still be replaced on the original with SetCertificates. Nil
+	// serves h2c with prior knowledge.
 	TLS *gtls.Config
+
+	// HTTP1Fallback serves HTTP/1.1 on the same port. With TLS, ALPN decides: "h2"
+	// gets HTTP/2, "http/1.1" or no ALPN at all (many bots and old clients) gets
+	// HTTP/1.1, so "existing clients keep working" needs no second port. Without
+	// TLS the first bytes decide: the HTTP/2 preface means h2c, anything else is
+	// HTTP/1.1. Handlers, routes and per-route limits are shared; the HTTP/1.1
+	// side takes its limits and timeouts from this Config (a ReadTimeout or
+	// IdleTimeout left at zero gets the HTTP/1.1 server's default there, not
+	// this one's). Costs nothing for an h2 connection beyond one flag test per
+	// connection; an HTTP/1.1 connection pays one pooled allocation.
+	HTTP1Fallback bool
 
 	TypeIDBase gina.TypeID // isolate type ids TypeIDBase and TypeIDBase+1 (default 210)
 }
@@ -134,7 +150,8 @@ func (c *Config) validate() error {
 type Server struct {
 	cfg    Config
 	router *ghttp.Router
-	tls    *gtls.Config // private copy with ALPN fixed to h2
+	tls    *gtls.Config  // private copy with ALPN fixed to h2
+	h1     *ghttp.Server // HTTP1Fallback: serves the connections that do not speak h2
 
 	st        []shardState // indexed by shard id; each is touched only by its own shard's thread
 	listenErr atomic.Pointer[error]
@@ -155,8 +172,15 @@ type shardState struct {
 
 // New creates a server that answers with r's handlers.
 func New(cfg Config, r *ghttp.Router) *Server {
+	var h1 *ghttp.Server
+	if cfg.HTTP1Fallback { // before defaults: a zero timeout means "the HTTP/1.1 default" there
+		h1 = ghttp.New(ghttp.Config{
+			MaxConns: cfg.MaxConns, MaxHeaderBytes: cfg.MaxHeaderBytes, MaxURIBytes: cfg.MaxURIBytes, MaxBodyBytes: cfg.MaxBodyBytes,
+			IdleTimeout: cfg.IdleTimeout, ReadTimeout: cfg.ReadTimeout, WriteTimeout: cfg.WriteTimeout, ConnMailbox: cfg.ConnMailbox,
+		}, r)
+	}
 	cfg.defaults()
-	return &Server{cfg: cfg, router: r}
+	return &Server{cfg: cfg, router: r, h1: h1}
 }
 
 // Port returns the port a shard's listener bound (0 before it started).
@@ -175,12 +199,19 @@ func (s *Server) setListenErr(err error) { s.listenErr.Store(&err) }
 // Requests is the number of requests answered (all shards); Conns the open
 // connections; Rejected the connections shed because a shard was full.
 func (s *Server) Requests() uint64 {
-	return sumU(s.st, func(t *shardState) uint64 { return t.requests.Load() })
+	n := sumU(s.st, func(t *shardState) uint64 { return t.requests.Load() })
+	if s.h1 != nil {
+		n += s.h1.Requests()
+	}
+	return n
 }
 func (s *Server) Conns() int {
 	var n int64
 	for i := range s.st {
 		n += s.st[i].conns.Load()
+	}
+	if s.h1 != nil {
+		n += int64(s.h1.Conns())
 	}
 	return int(n)
 }
@@ -209,22 +240,36 @@ func (s *Server) Install(spec *gina.SystemSpec) error {
 		return err
 	}
 	if t := s.cfg.TLS; t != nil {
+		protos := []string{"h2"}
+		if s.h1 != nil {
+			protos = append(protos, "http/1.1")
+		}
 		for _, p := range t.NextProtos {
-			if p != "h2" {
-				return errors.New("http2: TLS.NextProtos may only list \"h2\" (this server speaks no other protocol)")
+			switch p {
+			case "h2":
+			case "http/1.1":
+				if s.h1 == nil {
+					return errors.New("http2: TLS.NextProtos lists \"http/1.1\" but Config.HTTP1Fallback is off")
+				}
+			case gtls.ACMETLS1:
+				protos = append(protos, p) // TLS-ALPN-01 validation connections: closed after the handshake
+			default:
+				return errors.New("http2: TLS.NextProtos may only list \"h2\" and \"acme-tls/1\" (this server speaks no other protocol)")
 			}
 		}
-		cp := *t
-		cp.NextProtos = []string{"h2"}
-		if err := cp.Validate(); err != nil {
+		cp, err := t.WithNextProtos(protos...) // shares t's certificate store: t.SetCertificates reaches the server
+		if err != nil {
 			return err
 		}
-		s.tls = &cp
+		s.tls = cp
 	}
 	if n > 1 && !s.cfg.ReusePort {
 		return errors.New("http2: more than one shard needs Config.ReusePort (each shard binds its own listener)")
 	}
 	s.st = make([]shardState, n)
+	if s.h1 != nil {
+		s.h1.InitEmbedded(n)
+	}
 	lid, cid := s.cfg.TypeIDBase, s.cfg.TypeIDBase+1
 	spec.Types = append(spec.Types,
 		gina.RegisterType(lid, gina.TypeOptions{SlotCount: 2, MailboxCapacity: 4}, s.listenerInit, s.listenerHandler),
@@ -246,7 +291,7 @@ type listener struct{ fd gina.FDHandle }
 const tagBackoff = gina.TagUserBase
 
 func (s *Server) listenerInit(l *listener, g *gina.Ctx, _ []byte) gina.Effect {
-	fd, err := g.Listen(gina.ListenSpec{Addr: s.cfg.Addr, Port: s.cfg.Port, ReusePort: s.cfg.ReusePort, Backlog: s.cfg.Backlog})
+	fd, err := g.Listen(gina.ListenSpec{Addr: s.cfg.Addr, IP: s.cfg.IP, Port: s.cfg.Port, ReusePort: s.cfg.ReusePort, Backlog: s.cfg.Backlog})
 	if err != nil {
 		s.setListenErr(err)
 		return gina.Crash(gina.FaultInitFailed)

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"gina/internal/prng"
+	"github.com/rm4n0s/gina/internal/prng"
 )
 
 func parse(raw string) (parseState, int, int, int, *Request) {
@@ -81,7 +81,10 @@ func TestParseRejects(t *testing.T) {
 		{"space before colon", "GET / HTTP/1.1\r\nHost : h\r\n\r\n", 400},
 		{"control char in value", "GET / HTTP/1.1\r\nHost: h\x01\r\n\r\n", 400},
 		{"TE + CL", "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\nContent-Length: 3\r\n\r\n", 400},
-		{"chunked unsupported", "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n", 501},
+		{"other transfer coding", "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: gzip, chunked\r\n\r\n", 501},
+		{"transfer coding gzip", "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: gzip\r\n\r\n", 501},
+		{"two TE headers", "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n", 400},
+		{"TE on HTTP/1.0", "POST / HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n", 400},
 		{"conflicting CL", "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\n", 400},
 		{"CL list", "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 3, 3\r\n\r\n", 400},
 		{"CL sign", "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: -1\r\n\r\n", 400},

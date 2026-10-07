@@ -1,9 +1,11 @@
 package http2
 
 import (
-	"gina"
-	ghttp "gina/extensions/http"
+	"io"
 	"strconv"
+
+	"github.com/rm4n0s/gina"
+	ghttp "github.com/rm4n0s/gina/extensions/http"
 )
 
 // ---- request headers (RFC 9113 §8.2, §8.3) ----
@@ -219,6 +221,10 @@ func methodName(b []byte) (string, bool) {
 // complete runs when a request has fully arrived: build the http.Request, run
 // the router, send the response.
 func (s *Server) complete(cs *conn, g *gina.Ctx, st *stream) {
+	if st.streaming {
+		s.endStreamed(cs, g, st)
+		return
+	}
 	ext := st.seen&seenProtocol != 0 // extended CONNECT: answered as a GET, and the stream may become a tunnel
 	if ext && st.recvEnded {
 		s.reject(cs, g, st, 400) // nothing could ever be tunnelled
@@ -237,9 +243,17 @@ func (s *Server) complete(cs *conn, g *gina.Ctx, st *stream) {
 		return
 	}
 
-	// Request headers, with the :authority as Host and split cookies joined (§8.2.3).
+	cs.hdrs, cs.cookie = fillRequest(&cs.req, st, method, ext, cs.hdrs[:0], cs.cookie)
+	cs.c.Begin(g, &cs.req, cs.tls, cs.fd)
+	s.router.Dispatch(&cs.c)
+	s.respond(cs, g, st, cs.c.Result(), method == "HEAD")
+}
+
+// fillRequest builds the http.Request of a stream: its headers with the
+// :authority as Host and split cookies joined (§8.2.3). hdrs and cookie are
+// scratch space the request's slices live in; the grown versions come back.
+func fillRequest(req *ghttp.Request, st *stream, method string, ext bool, hdrs []ghttp.Header, cookie []byte) ([]ghttp.Header, []byte) {
 	hb := st.hbuf
-	cs.hdrs = cs.hdrs[:0]
 	cookies, hasHost := 0, false
 	for _, f := range st.hf {
 		switch name := hb[f.nameOff:f.valOff]; string(name) {
@@ -250,44 +264,103 @@ func (s *Server) complete(cs *conn, g *gina.Ctx, st *stream) {
 		}
 	}
 	if cookies > 1 {
-		cs.cookie = cs.cookie[:0]
+		cookie = cookie[:0]
 	}
 	for _, f := range st.hf {
 		name, value := hb[f.nameOff:f.valOff], hb[f.valOff:f.end]
 		if cookies > 1 && string(name) == "cookie" {
-			if len(cs.cookie) > 0 {
-				cs.cookie = append(cs.cookie, "; "...)
+			if len(cookie) > 0 {
+				cookie = append(cookie, "; "...)
 			}
-			cs.cookie = append(cs.cookie, value...)
+			cookie = append(cookie, value...)
 			continue
 		}
-		cs.hdrs = append(cs.hdrs, ghttp.Header{Name: name, Value: value})
+		hdrs = append(hdrs, ghttp.Header{Name: name, Value: value})
 	}
 	if cookies > 1 {
-		cs.hdrs = append(cs.hdrs, ghttp.Header{Name: []byte("cookie"), Value: cs.cookie})
+		hdrs = append(hdrs, ghttp.Header{Name: []byte("cookie"), Value: cookie})
 	}
 	if !hasHost && st.seen&seenAuthority != 0 {
-		cs.hdrs = append(cs.hdrs, ghttp.Header{Name: []byte("host"), Value: st.val(st.auth)})
+		hdrs = append(hdrs, ghttp.Header{Name: []byte("host"), Value: st.val(st.auth)})
 	}
 
 	target := st.val(st.path)
-	cs.req = ghttp.Request{
-		Method: method, Target: target, Path: target, Minor: 1, Headers: cs.hdrs,
+	*req = ghttp.Request{
+		Method: method, Target: target, Path: target, Minor: 1, Headers: hdrs,
 		Body: st.body, ContentLength: len(st.body), KeepAlive: true,
 	}
 	if ext {
-		cs.req.Protocol = st.val(st.proto)
+		req.Protocol = st.val(st.proto)
 	}
 	for i, c := range target {
 		if c == '?' {
-			cs.req.Path, cs.req.Query = target[:i], target[i+1:]
+			req.Path, req.Query = target[:i], target[i+1:]
 			break
 		}
 	}
+	return hdrs, cookie
+}
 
-	cs.c.Begin(g, &cs.req, cs.tls)
-	s.router.Dispatch(&cs.c)
-	s.respond(cs, g, st, cs.c.Result(), method == "HEAD")
+// beginStreamed starts a request whose route takes its body as a stream: the
+// handler runs now, with the headers, and registers the callback that receives
+// DATA as it arrives. The stream gets a Request and a Context of its own, since
+// other streams of the connection run handlers while this one is still open.
+func (s *Server) beginStreamed(cs *conn, g *gina.Ctx, st *stream) {
+	method, ok := methodName(st.val(st.method))
+	if !ok {
+		s.reject(cs, g, st, 501)
+		return
+	}
+	st.sreq, st.sctx = new(ghttp.Request), new(ghttp.Context)
+	fillRequest(st.sreq, st, method, false, nil, nil)
+	st.sreq.ContentLength = int(st.clen)
+	st.sctx.Begin(g, st.sreq, cs.tls, cs.fd)
+	s.router.DispatchStream(st.sctx)
+	if !st.sctx.HasBodyHandler() { // answered without taking the body: ignore the rest of it
+		st.discard = true
+		s.respond(cs, g, st, st.sctx.Result(), method == "HEAD")
+		return
+	}
+	st.streaming = true
+}
+
+// streamedData delivers one DATA frame of a streamed upload.
+func (s *Server) streamedData(cs *conn, g *gina.Ctx, st *stream, flags byte, data []byte) {
+	end := flags&flagEndStream != 0
+	if st.bodyRecv += int64(len(data)); st.bodyRecv > int64(st.maxBody) {
+		s.creditConn(cs)
+		st.abortBody()
+		s.reject(cs, g, st, 413)
+		return
+	}
+	if end && st.clen >= 0 && st.bodyRecv != st.clen {
+		st.abortBody()
+		s.streamErr(cs, st, errProtocol) // body does not match content-length (§8.1.1)
+		return
+	}
+	stop := st.sctx.DeliverBody(data, end)
+	s.creditConn(cs)
+	switch {
+	case stop || end:
+		st.streaming = false
+		st.recvEnded = st.recvEnded || end
+		st.discard = !end // answered early: the rest of the request is ignored
+		s.respond(cs, g, st, st.sctx.Result(), false)
+	default:
+		s.creditStream(cs, st)
+	}
+}
+
+// endStreamed finishes a streamed upload that ended with trailers instead of DATA.
+func (s *Server) endStreamed(cs *conn, g *gina.Ctx, st *stream) {
+	if st.clen >= 0 && st.bodyRecv != st.clen {
+		st.abortBody()
+		s.streamErr(cs, st, errProtocol)
+		return
+	}
+	st.sctx.DeliverBody(nil, true)
+	st.streaming = false
+	s.respond(cs, g, st, st.sctx.Result(), false)
 }
 
 // reject answers a request with a plain-text error without running a handler,
@@ -303,6 +376,10 @@ func (s *Server) reject(cs *conn, g *gina.Ctx, st *stream, code int) {
 func (s *Server) respond(cs *conn, g *gina.Ctx, st *stream, res ghttp.Result, head bool) {
 	ss := s.sh(g)
 	ss.requests.Add(1)
+	if res.Source != nil && (res.Tunnel != nil || res.Stream) { // contradictory: the tunnel or stream wins
+		ghttp.CloseSource(res.Source)
+		res.Source = nil
+	}
 	if res.Tunnel != nil && st.seen&seenProtocol != 0 && !st.recvEnded && res.Status/100 == 2 {
 		s.openTunnel(cs, g, st, res)
 		return
@@ -313,6 +390,11 @@ func (s *Server) respond(cs *conn, g *gina.Ctx, st *stream, res ghttp.Result, he
 	}
 	allowed := ghttp.BodyAllowed(res.Status)
 	body := res.Body
+	src, streamed := res.Source, res.Source != nil
+	if src != nil && (head || !allowed) { // nothing to send: do not read it
+		ghttp.CloseSource(src)
+		src = nil
+	}
 
 	blk := appendStatus(cs.hblk[:0], res.Status)
 	if allowed {
@@ -324,22 +406,33 @@ func (s *Server) respond(cs *conn, g *gina.Ctx, st *stream, res ghttp.Result, he
 			blk = appendLiteral(blk, []byte("content-type"), []byte(ct))
 		}
 		var num [20]byte
-		blk = appendLiteral(blk, []byte("content-length"), strconv.AppendInt(num[:0], int64(len(body)), 10))
+		switch {
+		case !streamed:
+			blk = appendLiteral(blk, []byte("content-length"), strconv.AppendInt(num[:0], int64(len(body)), 10))
+		case res.SourceSize >= 0:
+			blk = appendLiteral(blk, []byte("content-length"), strconv.AppendInt(num[:0], res.SourceSize, 10))
+		} // streamed, length unknown: the stream's END_STREAM delimits the body
 	}
 	blk = appendLiteral(blk, []byte("date"), ss.date())
 	blk = appendLiteral(blk, []byte("server"), []byte("gina"))
 	blk = cs.appendExtra(blk, res, allowed)
 	cs.hblk = blk[:0]
 
-	endNow := !allowed || head || len(body) == 0
+	endNow := !allowed || head || (len(body) == 0 && src == nil)
 	cs.writeHeaders(st.id, blk, endNow)
 	if endNow {
 		s.finish(cs, st)
 		return
 	}
 	st.resp = body
-	cs.sendBody(st, 1<<30)
-	if len(st.resp) == 0 {
+	if src != nil {
+		st.src, st.srcLeft, st.resp = src, res.SourceSize, nil
+	}
+	if _, ok := cs.sendBody(st, 1<<30); !ok {
+		s.abort(cs, st)
+		return
+	}
+	if st.fin {
 		s.finish(cs, st)
 		return
 	}
@@ -402,20 +495,36 @@ func (cs *conn) writeHeaders(id uint32, blk []byte, endStream bool) {
 	}
 }
 
+// srcBuf is how much of a streamed body is read at a time.
+const srcBuf = 32 << 10
+
 // sendBody queues DATA frames for st.resp as far as both flow-control windows,
-// the peer's frame size, the output high-water mark and limit allow.
-func (cs *conn) sendBody(st *stream, limit int) {
-	for len(st.resp) > 0 && limit > 0 && len(cs.out) < outHigh {
+// the peer's frame size, the output high-water mark and limit allow, reading more
+// of a streamed body when the buffer runs dry. It reports how many bytes it queued
+// and false if the body's source failed (the stream must then be reset). When it
+// queues the last frame, st.fin is set.
+func (cs *conn) sendBody(st *stream, limit int) (sent int, ok bool) {
+	for !st.fin && limit > 0 && len(cs.out) < outHigh {
+		if len(st.resp) == 0 && st.src != nil && !cs.refill(st) {
+			return sent, false
+		}
+		if len(st.resp) == 0 { // a streamed body that ended exactly at a refill boundary, or has no data left
+			var at int
+			cs.out, at = beginFrame(cs.out, frameData, flagEndStream, st.id)
+			endFrame(cs.out, at)
+			st.fin = true
+			return sent, true
+		}
 		n := min(len(st.resp), cs.maxFrame, limit)
 		if w := min(st.sendWin, cs.sendWin); w < int64(n) {
 			if w <= 0 {
-				return
+				return sent, true
 			}
 			n = int(w)
 		}
 		var flags byte
-		if n == len(st.resp) {
-			flags = flagEndStream
+		if n == len(st.resp) && st.src == nil {
+			flags, st.fin = flagEndStream, true
 		}
 		var at int
 		cs.out, at = beginFrame(cs.out, frameData, flags, st.id)
@@ -425,7 +534,50 @@ func (cs *conn) sendBody(st *stream, limit int) {
 		st.sendWin -= int64(n)
 		cs.sendWin -= int64(n)
 		limit -= n
+		sent += n
 	}
+	return sent, true
+}
+
+// refill reads the next piece of st's streamed body into st.resp. The source is
+// closed and cleared when the last piece is in hand; false means it failed or
+// ended before the length it promised.
+func (cs *conn) refill(st *stream) bool {
+	if cap(st.respBuf) < srcBuf {
+		st.respBuf = make([]byte, srcBuf)
+	}
+	buf := st.respBuf[:cap(st.respBuf)]
+	if st.srcLeft >= 0 && int64(len(buf)) > st.srcLeft {
+		buf = buf[:st.srcLeft]
+	}
+	var n int
+	var err error
+	for tries := 0; n == 0 && err == nil && tries < 8; tries++ {
+		n, err = st.src.Read(buf)
+	}
+	if n == 0 && err == nil {
+		err = io.ErrNoProgress
+	}
+	end := err != nil
+	if st.srcLeft >= 0 {
+		st.srcLeft -= int64(n)
+		if st.srcLeft == 0 {
+			end, err = true, nil
+		}
+	}
+	if err != nil && (err != io.EOF || st.srcLeft > 0) {
+		return false
+	}
+	st.resp = buf[:n]
+	if end {
+		st.closeSource()
+	}
+	return true
+}
+
+// abort resets a stream whose response cannot be completed.
+func (s *Server) abort(cs *conn, st *stream) {
+	s.streamErr(cs, st, errInternal)
 }
 
 // produce sends queued response bodies, round-robin in quantum-sized slices,
@@ -441,10 +593,14 @@ func (s *Server) produce(cs *conn, g *gina.Ctx) {
 				cs.release(st)
 				continue
 			}
-			before := len(st.resp)
-			cs.sendBody(st, quantum)
-			progress = progress || len(st.resp) < before
-			if len(st.resp) == 0 {
+			sent, ok := cs.sendBody(st, quantum)
+			progress = progress || sent > 0 || st.fin
+			switch {
+			case !ok:
+				cs.dequeue(i)
+				s.abort(cs, st)
+				continue
+			case st.fin:
 				cs.dequeue(i)
 				s.finish(cs, st)
 				continue

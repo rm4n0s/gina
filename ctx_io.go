@@ -2,6 +2,7 @@ package gina
 
 import (
 	"errors"
+	"net/netip"
 	"time"
 )
 
@@ -73,6 +74,11 @@ func (c *Ctx) CloseFD(fd FDHandle) {
 	}
 	c.s.io.closeFD(fd)
 }
+
+// PeerAddr returns the client address of a socket this shard accepted, recorded
+// at accept time (no syscall). IPv4-mapped IPv6 addresses are reported as IPv4.
+// ok is false for listeners, stale handles and sockets not made by accept.
+func (c *Ctx) PeerAddr(fd FDHandle) (netip.AddrPort, bool) { return c.s.io.peerAddr(fd) }
 
 // LocalPort returns the bound port of a socket (0 if unknown).
 func (c *Ctx) LocalPort(fd FDHandle) uint16 { return c.s.io.localPort(fd) }

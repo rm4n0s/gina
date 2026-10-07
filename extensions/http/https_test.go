@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"gina"
-	ghttp "gina/extensions/http"
-	gtls "gina/extensions/tls"
+	"github.com/rm4n0s/gina"
+	ghttp "github.com/rm4n0s/gina/extensions/http"
+	gtls "github.com/rm4n0s/gina/extensions/tls"
 )
 
 // steppedConn is a blocking net.Conn over a non-blocking socket whose "blocking"
@@ -97,6 +97,16 @@ type tlsHarness struct {
 
 func startTLS(t *testing.T, cfg ghttp.Config, shards int) *tlsHarness {
 	t.Helper()
+	return startTLSRoutes(t, cfg, routes(), shards)
+}
+
+func startTLSWith(t *testing.T, cfg ghttp.Config, r *ghttp.Router) *tlsHarness {
+	t.Helper()
+	return startTLSRoutes(t, cfg, r, 1)
+}
+
+func startTLSRoutes(t *testing.T, cfg ghttp.Config, r *ghttp.Router, shards int) *tlsHarness {
+	t.Helper()
 	cert, err := gtls.SelfSigned("localhost", "127.0.0.1")
 	if err != nil {
 		t.Fatal(err)
@@ -105,7 +115,7 @@ func startTLS(t *testing.T, cfg ghttp.Config, shards int) *tlsHarness {
 	roots := x509.NewCertPool()
 	roots.AddCert(leaf)
 	cfg.TLS = &gtls.Config{Certificates: []ctls.Certificate{cert}}
-	return &tlsHarness{harness: start(t, cfg, shards), roots: roots}
+	return &tlsHarness{harness: startWith(t, cfg, r, shards), roots: roots}
 }
 
 func (h *tlsHarness) client(cc *ctls.Config) (*ctls.Conn, error) {

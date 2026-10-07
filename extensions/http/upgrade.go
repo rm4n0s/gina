@@ -3,7 +3,7 @@ package http
 import (
 	"time"
 
-	"gina"
+	"github.com/rm4n0s/gina"
 )
 
 // Tunnels. A handler can hand the connection (HTTP/1.1, after a 101 response) or

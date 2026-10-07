@@ -3,6 +3,7 @@
 package gina
 
 import (
+	"net/netip"
 	"syscall"
 	"time"
 )
@@ -54,7 +55,10 @@ type fdEntry struct {
 	raw      int32
 	gen      uint32
 	used     bool
-	rop, wop int32 // pending read-side (accept/recv) and write-side (send) op, or -1
+	rop, wop int32    // pending read-side (accept/recv) and write-side (send) op, or -1
+	peerPort uint16   // accepted sockets: the client's address, recorded at accept
+	peerKind uint8    // 0 = none, 4 = IPv4, 6 = IPv6
+	peer     [16]byte // IPv4 uses the first 4 bytes
 }
 
 type ioOp struct {
@@ -188,16 +192,26 @@ func (r *reactor) register(raw int, listener bool) (FDHandle, bool) {
 	}
 	r.freeFDs = r.freeFDs[:n-1]
 	e := &r.fds[idx]
-	e.raw, e.used, e.rop, e.wop = int32(raw), true, -1, -1
+	e.raw, e.used, e.rop, e.wop, e.peerKind = int32(raw), true, -1, -1, 0
 	return FDHandle(uint64(e.gen)<<32 | uint64(idx+1)), true
 }
 
 func (r *reactor) listen(spec ListenSpec) (FDHandle, error) {
-	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM|syscall.SOCK_NONBLOCK|syscall.SOCK_CLOEXEC, 0)
+	v6 := spec.IP.IsValid() && !spec.IP.Unmap().Is4()
+	family := syscall.AF_INET
+	if v6 {
+		family = syscall.AF_INET6
+	}
+	fd, err := syscall.Socket(family, syscall.SOCK_STREAM|syscall.SOCK_NONBLOCK|syscall.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return 0, err
 	}
 	fail := func(err error) (FDHandle, error) { syscall.Close(fd); return 0, err }
+	if v6 { // dual-stack: an IPv6 socket also takes IPv4 clients
+		if err := syscall.SetsockoptInt(fd, syscall.IPPROTO_IPV6, syscall.IPV6_V6ONLY, 0); err != nil {
+			return fail(err)
+		}
+	}
 	if err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
 		return fail(err)
 	}
@@ -206,7 +220,16 @@ func (r *reactor) listen(spec ListenSpec) (FDHandle, error) {
 			return fail(err)
 		}
 	}
-	if err := syscall.Bind(fd, &syscall.SockaddrInet4{Port: int(spec.Port), Addr: spec.Addr}); err != nil {
+	var sa syscall.Sockaddr
+	switch {
+	case v6:
+		sa = &syscall.SockaddrInet6{Port: int(spec.Port), Addr: spec.IP.As16()}
+	case spec.IP.IsValid():
+		sa = &syscall.SockaddrInet4{Port: int(spec.Port), Addr: spec.IP.Unmap().As4()}
+	default:
+		sa = &syscall.SockaddrInet4{Port: int(spec.Port), Addr: spec.Addr}
+	}
+	if err := syscall.Bind(fd, sa); err != nil {
 		return fail(err)
 	}
 	backlog := spec.Backlog
@@ -232,10 +255,29 @@ func (r *reactor) localPort(h FDHandle) uint16 {
 	if err != nil {
 		return 0
 	}
-	if in4, ok := sa.(*syscall.SockaddrInet4); ok {
-		return uint16(in4.Port)
+	switch a := sa.(type) {
+	case *syscall.SockaddrInet4:
+		return uint16(a.Port)
+	case *syscall.SockaddrInet6:
+		return uint16(a.Port)
 	}
 	return 0
+}
+
+// peerAddr returns the client address recorded when the socket was accepted.
+func (r *reactor) peerAddr(h FDHandle) (netip.AddrPort, bool) {
+	idx := r.fdIndex(h)
+	if idx < 0 {
+		return netip.AddrPort{}, false
+	}
+	e := &r.fds[idx]
+	switch e.peerKind {
+	case 4:
+		return netip.AddrPortFrom(netip.AddrFrom4([4]byte(e.peer[:4])), e.peerPort), true
+	case 6:
+		return netip.AddrPortFrom(netip.AddrFrom16(e.peer).Unmap(), e.peerPort), true
+	}
+	return netip.AddrPort{}, false
 }
 
 func (r *reactor) closeFD(h FDHandle) {
@@ -320,7 +362,7 @@ func (r *reactor) try(oi int32, idx int) (res int64, done bool) {
 	switch op.kind {
 	case ioAccept:
 		for {
-			nfd, _, err := syscall.Accept4(raw, syscall.SOCK_NONBLOCK|syscall.SOCK_CLOEXEC)
+			nfd, from, err := syscall.Accept4(raw, syscall.SOCK_NONBLOCK|syscall.SOCK_CLOEXEC)
 			switch err {
 			case nil:
 				syscall.SetsockoptInt(nfd, syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
@@ -328,6 +370,14 @@ func (r *reactor) try(oi int32, idx int) (res int64, done bool) {
 				if !ok {
 					syscall.Close(nfd)
 					return -int64(syscall.EMFILE), true
+				}
+				e := &r.fds[int(uint32(h))-1]
+				switch a := from.(type) {
+				case *syscall.SockaddrInet4:
+					e.peerKind, e.peerPort = 4, uint16(a.Port)
+					copy(e.peer[:], a.Addr[:])
+				case *syscall.SockaddrInet6:
+					e.peerKind, e.peerPort, e.peer = 6, uint16(a.Port), a.Addr
 				}
 				return int64(h), true
 			case syscall.EAGAIN:

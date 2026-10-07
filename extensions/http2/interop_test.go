@@ -18,10 +18,10 @@ import (
 	"testing"
 	"time"
 
-	"gina"
-	ghttp "gina/extensions/http"
-	"gina/extensions/http2"
-	gtls "gina/extensions/tls"
+	"github.com/rm4n0s/gina"
+	ghttp "github.com/rm4n0s/gina/extensions/http"
+	"github.com/rm4n0s/gina/extensions/http2"
+	gtls "github.com/rm4n0s/gina/extensions/tls"
 )
 
 func routes() *ghttp.Router {
@@ -58,6 +58,9 @@ func routes() *ghttp.Router {
 		c.SetHeader("Connection", "close") // must not reach an HTTP/2 client
 		c.String(200, "ok")
 	})
+	echo := func(c *ghttp.Context) { c.Bytes(200, "application/octet-stream", c.Req.Body) }
+	r.POST("/small", echo).MaxBody(10)
+	r.POST("/big", echo).MaxBody(400_000)
 	r.GET("/redirect", func(c *ghttp.Context) { c.Redirect(302, "/hello/redirected") })
 	r.GET("/sse", func(c *ghttp.Context) { c.EventStream(0) })
 	r.GET("/shard", func(c *ghttp.Context) { c.String(200, strconv.Itoa(int(c.Gina().ShardID()))) })
@@ -88,6 +91,11 @@ type option func(*http2.Config)
 
 func start(t *testing.T, shards int, useTLS bool, opts ...option) *srv {
 	t.Helper()
+	return startWith(t, routes(), shards, useTLS, opts...)
+}
+
+func startWith(t *testing.T, r *ghttp.Router, shards int, useTLS bool, opts ...option) *srv {
+	t.Helper()
 	port := freePort(t)
 	cfg := http2.Config{Addr: [4]byte{127, 0, 0, 1}, Port: port, ReusePort: true, MaxConns: 512}
 	for _, o := range opts {
@@ -113,7 +121,7 @@ func start(t *testing.T, shards int, useTLS bool, opts ...option) *srv {
 		p.SetUnencryptedHTTP2(true) // h2c with prior knowledge
 		tr.Protocols = &p
 	}
-	s := http2.New(cfg, routes())
+	s := http2.New(cfg, r)
 	spec := gina.SystemSpec{Shards: make([]gina.ShardSpec, shards)}
 	if err := s.Install(&spec); err != nil {
 		t.Fatal(err)
@@ -431,5 +439,42 @@ func TestShardThreads(t *testing.T) {
 			t.Fatalf("connections reached only %d of 4 shard threads: %v", len(shards), shards)
 		}
 		t.Logf("connections per shard: %v", shards)
+	})
+}
+
+func TestPerRouteBodyLimits(t *testing.T) {
+	eachMode(t, func(t *testing.T, useTLS bool) {
+		h := start(t, 1, useTLS, func(c *http2.Config) { c.MaxBodyBytes = 1000 })
+		for _, tc := range []struct {
+			path   string
+			n      int
+			status int
+		}{
+			{"/echo", 1000, 200}, {"/echo", 1001, 413}, // the server default
+			{"/big", 300_000, 200}, {"/big", 400_001, 413}, // raised for one route
+			{"/small", 10, 200}, {"/small", 11, 413}, // lowered for another
+		} {
+			resp, _ := h.do("POST", tc.path, bytes.NewReader(make([]byte, tc.n)))
+			if resp.StatusCode != tc.status {
+				t.Errorf("POST %s with %d bytes: %d, want %d", tc.path, tc.n, resp.StatusCode, tc.status)
+			}
+		}
+		// a streamed (undeclared length) upload hits the route's limit as it grows
+		pr, pw := io.Pipe()
+		go func() {
+			for i := 0; i < 20; i++ {
+				if _, err := pw.Write(make([]byte, 30)); err != nil {
+					return
+				}
+			}
+			pw.Close()
+		}()
+		if resp, err := h.client.Post(h.url("/small"), "application/octet-stream", pr); err == nil {
+			resp.Body.Close()
+			if resp.StatusCode != 413 {
+				t.Errorf("streamed upload to /small: %d", resp.StatusCode)
+			}
+		}
+		pr.CloseWithError(io.ErrClosedPipe)
 	})
 }

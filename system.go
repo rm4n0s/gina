@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"gina/internal/prng"
+	"github.com/rm4n0s/gina/internal/prng"
 )
 
 // Clock supplies monotonic nanoseconds. Production uses RealClock; the

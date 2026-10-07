@@ -5,7 +5,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"gina"
+	"github.com/rm4n0s/gina"
 )
 
 // parser phases
@@ -201,9 +201,14 @@ func (c *Conn) Push(g *gina.Ctx, p []byte) {
 		return
 	}
 	c.enter(g)
+	if lost := g.TakeLost(); lost > 0 {
+		c.overflow(int(lost))
+	}
 	switch op := Opcode(p[0]); op {
 	case OpText, OpBinary:
-		c.Send(op, p[1:])
+		if c.Send(op, p[1:]) == ErrQueueFull {
+			c.overflow(1)
+		}
 	case OpPing:
 		c.Ping(p[1:])
 	case OpClose:
@@ -214,6 +219,18 @@ func (c *Conn) Push(g *gina.Ctx, p []byte) {
 		}
 	}
 	c.leave()
+}
+
+// overflow handles a subscriber that missed pushed messages (see Config.OnOverflow).
+func (c *Conn) overflow(lost int) {
+	if c.closeSent || c.done {
+		return
+	}
+	if f := c.e.cfg.OnOverflow; f != nil {
+		f(c, lost)
+		return
+	}
+	c.Close(CloseTryAgainLater, "too far behind")
 }
 
 // Outgoing implements http.Tunnel.

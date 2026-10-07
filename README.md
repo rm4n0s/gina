@@ -109,6 +109,16 @@ Against `net/http` serving HTTP/2 only, on the same cores (64 connections x 4 st
   <img src="bench/results-h2.png" alt="Six charts comparing Gina (shard threads in one process) with Go net/http serving HTTP/2 on 1 to 8 cores. Gina is 3.9 to 6.7 times faster on keep-alive GET over h2c and 4.0 to 6.6 times over h2 with TLS, 4.0 times faster on a 64 KiB echo over h2c and 2.9 times over TLS, and has a 9 to 17 times lower p99 latency. Gina's 4- and 8-core points are probably limited by the load generator. At 8 cores Gina uses 54 MB against 22 MB over h2c and 83 MB against 22 MB over TLS.">
 </picture>
 
+## Operating a server
+
+- **Client address.** `ctx.PeerAddr(fd)` and `Context.RemoteAddr()` return the TCP peer, recorded at accept (no syscall). Behind a proxy that is the proxy: read `X-Forwarded-For` yourself.
+- **IPv6.** `ListenSpec.IP` / `Config.IP`; `::` is dual-stack and IPv4 clients are reported as IPv4.
+- **Talking to the system from outside.** `sys.SendExternal(handle, tag, payload)` (and `SendExternalTo`) is safe from any goroutine while the system runs. It queues the message on the target shard and wakes it; the result says whether it was queued (it can still be dropped at the mailbox, counted in `Stats().Dropped`).
+- **Certificates.** `tlsCfg.SetCertificates(...)` swaps certificates for new handshakes without a restart, and `TLS.GetCertificate` picks one per ClientHello (return a `*gtls.Certificate` made once with `NewCertificate`). List `gtls.ACMETLS1` in `NextProtos` and answer it with `gtls.ALPNChallengeCertificate` to pass TLS-ALPN-01; the HTTP servers close such connections after the handshake.
+- **One port for h2 and HTTP/1.1.** `http2.Config{HTTP1Fallback: true}`: ALPN `h2` gets HTTP/2; `http/1.1` or no ALPN gets HTTP/1.1 (without TLS the HTTP/2 preface decides).
+- **Bodies.** Chunked request bodies are decoded. `r.POST(...).MaxBody(n).ReadTimeout(d)` sets limits per route (the server default stays small). `.StreamBody()` delivers the body to `c.OnBody(func(c, chunk, last))` as it arrives, in constant memory, with `c.StopBody` to refuse early and `c.BodyAborted()` when the client leaves. `c.SendReader(code, type, size, r)` and `c.ServeFile/ServeFS` stream a response in 32 KiB pieces (known length, or chunked / END_STREAM when unknown), with `Range`/`If-Range` support (`c.ServeBytes` for in-memory bodies). Reads run on the shard thread: fine for the page cache, not for slow sources. Works on HTTP/1.1 and HTTP/2.
+- **Slow subscribers.** `ctx.TakeLost()` counts messages dropped for an isolate. A WebSocket connection that missed pushes (or whose unsent output hit `MaxQueued`) is closed with 1013, or `Config.OnOverflow` decides, e.g. `c.Close(CloseTryAgainLater, `{"reconnect":true}`)`.
+
 ## WebSocket
 
 `extensions/websocket` serves WebSocket (RFC 6455) over everything above: **ws and wss over HTTP/1.1**, and **ws and wss over HTTP/2** (RFC 8441, one stream of a shared connection per WebSocket). It is a protocol on top of the HTTP servers, not a server of its own: a route hands the request to an `Endpoint`, and the same `Endpoint` and the same callbacks serve all four ways in.

@@ -23,10 +23,10 @@ import (
 	"os"
 	"strconv"
 
-	"gina"
-	ghttp "gina/extensions/http"
-	"gina/extensions/http2"
-	gtls "gina/extensions/tls"
+	"github.com/rm4n0s/gina"
+	ghttp "github.com/rm4n0s/gina/extensions/http"
+	"github.com/rm4n0s/gina/extensions/http2"
+	gtls "github.com/rm4n0s/gina/extensions/tls"
 )
 
 func main() {

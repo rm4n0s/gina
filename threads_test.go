@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"gina"
+	"github.com/rm4n0s/gina"
 )
 
 // waitOrFail waits for the system to stop; a hang almost certainly means a lost wake-up.

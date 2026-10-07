@@ -24,7 +24,8 @@ type isoType struct {
 	mboxCap int
 	stride  int // mboxCap+1: one extra slot so an I/O completion can always be pushed to the front
 	ioop    []int32
-	intr    []bool // parked in WaitIOOrMessage: a message interrupts the pending read
+	lost    []uint32 // messages this slot lost because its mailbox or the pool was full (Ctx.TakeLost)
+	intr    []bool   // parked in WaitIOOrMessage: a message interrupts the pending read
 	ownfd   []FDHandle
 	gen     []uint32
 	state   []uint8
@@ -40,7 +41,7 @@ func newIsoType(d TypeDesc) *isoType {
 	o := d.opts
 	t := &isoType{
 		id: d.id, ops: d.build(o), slots: o.SlotCount, mboxCap: o.MailboxCapacity, stride: o.MailboxCapacity + 1,
-		ioop: make([]int32, o.SlotCount), intr: make([]bool, o.SlotCount), ownfd: make([]FDHandle, o.SlotCount),
+		ioop: make([]int32, o.SlotCount), lost: make([]uint32, o.SlotCount), intr: make([]bool, o.SlotCount), ownfd: make([]FDHandle, o.SlotCount),
 		gen: make([]uint32, o.SlotCount), state: make([]uint8, o.SlotCount),
 		mbuf:  make([]uint32, o.SlotCount*(o.MailboxCapacity+1)),
 		mhead: make([]uint32, o.SlotCount), mlen: make([]uint32, o.SlotCount),
@@ -85,6 +86,8 @@ type Shard struct {
 	readyBuf  []uint32
 	rhead, rl int
 	timers    timerHeap
+
+	ext extInbox // messages injected from outside the system (SendExternal)
 
 	out []*ring // indexed by destination shard (nil for self)
 	in  []*ring // indexed by source shard (nil for self)
@@ -223,6 +226,7 @@ func (s *Shard) freeSlot(t *isoType, slot uint32) {
 		t.ioop[slot] = -1
 	}
 	t.intr[slot] = false
+	t.lost[slot] = 0
 	if fd := t.ownfd[slot]; fd != 0 {
 		t.ownfd[slot] = 0
 		s.io.closeFD(fd)
@@ -262,10 +266,16 @@ func (s *Shard) enqueue(to Handle, m *Message, att any, system bool) SendResult 
 		return SendStaleHandle
 	}
 	if t.mlen[slot] >= uint32(t.mboxCap) {
+		if !system {
+			t.lost[slot]++
+		}
 		return SendMailboxFull
 	}
 	idx, ok := s.poolAlloc(system)
 	if !ok {
+		if !system {
+			t.lost[slot]++
+		}
 		return SendPoolExhausted
 	}
 	p := &s.pool[idx]
@@ -329,6 +339,9 @@ func (s *Shard) Tick() bool {
 				r.discard()
 			}
 		}
+		if s.externalPending() {
+			s.discardExternal()
+		}
 		return false
 	}
 	p := false
@@ -337,6 +350,9 @@ func (s *Shard) Tick() bool {
 	}
 	s.io.flush()
 	p = s.drainInbound() || p // 1. cross-shard messages
+	if s.externalPending() {  //    ...and those injected from outside
+		p = s.drainExternal() || p
+	}
 	p = s.fireTimers() || p   // 2. timers
 	p = s.dispatch() || p     // 3. isolate turns
 	for i, r := range s.out { // 4. publish outbound batches, then wake any peer that is asleep
@@ -669,7 +685,7 @@ func (s *Shard) pending() bool {
 	if s.quarantined.Load() {
 		return false
 	}
-	if s.rl > 0 {
+	if s.rl > 0 || s.externalPending() {
 		return true
 	}
 	for _, r := range s.in {
@@ -755,6 +771,18 @@ func (c *Ctx) Self() Handle         { return c.self }
 func (c *Ctx) ShardID() uint8       { return c.s.id }
 func (c *Ctx) IsShuttingDown() bool { return c.s.shutting }
 func (c *Ctx) Now() uint64          { return c.s.sys.clock.Now() }
+
+// TakeLost returns how many messages addressed to this isolate were dropped
+// since the last call (its mailbox or the shard's message pool was full), and
+// resets the count. A sender on another shard is told nothing when this happens
+// at the receiving end, so a receiver that must not miss data (a push
+// subscriber that has fallen behind) asks for itself. The count is kept per
+// isolate; it costs one increment on the drop path and nothing otherwise.
+func (c *Ctx) TakeLost() uint32 {
+	n := c.t.lost[c.slot]
+	c.t.lost[c.slot] = 0
+	return n
+}
 
 // Attachment returns the Go value sent with SendAttach (nil otherwise). It is
 // valid for the current turn only.

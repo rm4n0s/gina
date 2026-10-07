@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"gina"
-	ghttp "gina/extensions/http"
+	"github.com/rm4n0s/gina"
+	ghttp "github.com/rm4n0s/gina/extensions/http"
 )
 
 // The tests drive the server and a non-blocking client from one thread: with no
@@ -44,13 +44,34 @@ func routes() *ghttp.Router {
 			ghttp.SendEvent(c.Gina(), conn, "again")
 		}
 	})
+	echo := func(c *ghttp.Context) { c.Bytes(200, "application/octet-stream", c.Req.Body) }
+	r.POST("/small", echo).MaxBody(10)
+	r.POST("/big", echo).MaxBody(300_000)
+	r.POST("/slow", echo).ReadTimeout(150 * time.Millisecond)
+	r.GET("/data", func(c *ghttp.Context) { c.ServeBytes("application/octet-stream", []byte("0123456789")) })
+	r.GET("/tagged", func(c *ghttp.Context) {
+		c.SetHeader("ETag", `"v1"`)
+		c.ServeBytes("application/octet-stream", []byte("0123456789"))
+	})
+	r.GET("/ip", func(c *ghttp.Context) {
+		if a, ok := c.RemoteAddr(); ok {
+			c.String(200, a.String())
+		} else {
+			c.String(500, "no address")
+		}
+	})
 	r.GET("/shard", func(c *ghttp.Context) { c.String(200, strconv.Itoa(int(c.Gina().ShardID()))) })
 	return r
 }
 
 func start(t *testing.T, cfg ghttp.Config, shards int) *harness {
 	t.Helper()
-	srv := ghttp.New(cfg, routes())
+	return startWith(t, cfg, routes(), shards)
+}
+
+func startWith(t *testing.T, cfg ghttp.Config, r *ghttp.Router, shards int) *harness {
+	t.Helper()
+	srv := ghttp.New(cfg, r)
 	spec := gina.SystemSpec{Shards: make([]gina.ShardSpec, shards)}
 	if err := srv.Install(&spec); err != nil {
 		t.Fatal(err)
@@ -277,7 +298,7 @@ func TestProtocolErrorsAreAnsweredAndClosed(t *testing.T) {
 		{"malformed", "GARBAGE\r\n\r\n", 400},
 		{"http2", "GET / HTTP/2.0\r\nHost: t\r\n\r\n", 505},
 		{"smuggling", "POST /echo HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\nContent-Length: 4\r\n\r\n", 400},
-		{"chunked", "POST /echo HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n", 501},
+		{"other transfer coding", "POST /echo HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: gzip\r\n\r\n", 501},
 		{"huge header", "GET / HTTP/1.1\r\nHost: t\r\nX: " + strings.Repeat("a", 20000) + "\r\n\r\n", 431},
 		{"long uri", "GET /" + strings.Repeat("a", 9000) + " HTTP/1.1\r\nHost: t\r\n\r\n", 414},
 		{"body too large", "POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: 999999\r\n\r\n", 413},

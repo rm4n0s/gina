@@ -16,9 +16,9 @@ import (
 	"os"
 	"strconv"
 
-	"gina"
-	ghttp "gina/extensions/http"
-	gtls "gina/extensions/tls"
+	"github.com/rm4n0s/gina"
+	ghttp "github.com/rm4n0s/gina/extensions/http"
+	gtls "github.com/rm4n0s/gina/extensions/tls"
 )
 
 func main() {

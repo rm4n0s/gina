@@ -1,13 +1,16 @@
 package http2
 
 import (
+	"bytes"
 	"encoding/binary"
+	"io"
+	"math"
 	"syscall"
 	"time"
 
-	"gina"
-	ghttp "gina/extensions/http"
-	gtls "gina/extensions/tls"
+	"github.com/rm4n0s/gina"
+	ghttp "github.com/rm4n0s/gina/extensions/http"
+	gtls "github.com/rm4n0s/gina/extensions/tls"
 )
 
 const (
@@ -57,6 +60,12 @@ type stream struct {
 	seen                       uint8
 	sawRegular                 bool
 	clen                       int64 // declared content-length, -1 if none
+	maxBody                    int   // this request's body limit (its route's, else Config.MaxBodyBytes)
+	streamBody                 bool  // its route takes the body as a stream (Route.StreamBody)
+	streaming                  bool  // the handler's OnBody callback is receiving the body
+	bodyRecv                   int64 // body bytes delivered to it
+	sctx                       *ghttp.Context
+	sreq                       *ghttp.Request
 	body                       []byte
 
 	gotHeaders bool // the request header block has been processed
@@ -67,6 +76,10 @@ type stream struct {
 
 	resp    []byte // response body still to send
 	respBuf []byte // private copy of resp (the Context's buffer is reused)
+
+	src     io.Reader // a streamed response body (Context.SendReader), read as the windows allow
+	srcLeft int64     // bytes of it still to read; -1 = until EOF
+	fin     bool      // the response, END_STREAM included, has been queued
 
 	tun       ghttp.Tunnel // extended CONNECT accepted: DATA belongs to this tunnel
 	tunClosed bool         // tun.Closed has been called
@@ -91,6 +104,11 @@ type conn struct {
 	peerGoAway bool
 
 	hp *hpackDecoder
+
+	// HTTP1Fallback: until the first bytes (or ALPN) show which protocol the peer
+	// speaks the connection is undecided; an HTTP/1.1 peer hands it to h1c.
+	undecided bool
+	h1c       *ghttp.Conn
 
 	// peer settings that govern what we send
 	maxFrame int
@@ -142,12 +160,11 @@ func (s *Server) connInit(cs *conn, g *gina.Ctx, _ []byte) gina.Effect {
 	st := s.sh(g)
 	cs.rbuf = st.getBuf(4096)
 	cs.out = st.getBuf(1024)[:0]
-	cs.hp = newHpackDecoder(4096, s.cfg.MaxHeaderBytes)
-	cs.streams = make(map[uint32]*stream)
-	cs.maxFrame, cs.initWin = 16384, defaultWindow
-	cs.sendWin, cs.recvWin = defaultWindow, defaultWindow
-	cs.tokens, cs.tokAt = ctlBurst, g.Now()
-	cs.onFieldFn = func(name, value []byte) { s.onField(cs, name, value) }
+	if s.h1 != nil {
+		cs.undecided = true // the HTTP/2 state is set up if and when the peer turns out to speak it
+	} else {
+		s.initH2(cs, g)
+	}
 	if s.tls != nil {
 		t, err := gtls.NewServer(s.tls)
 		if err != nil {
@@ -160,12 +177,80 @@ func (s *Server) connInit(cs *conn, g *gina.Ctx, _ []byte) gina.Effect {
 	return s.step(cs, g)
 }
 
+// initH2 sets up what an HTTP/2 connection needs beyond buffers.
+func (s *Server) initH2(cs *conn, g *gina.Ctx) {
+	cs.hp = newHpackDecoder(4096, s.cfg.MaxHeaderBytes)
+	cs.streams = make(map[uint32]*stream)
+	cs.maxFrame, cs.initWin = 16384, defaultWindow
+	cs.sendWin, cs.recvWin = defaultWindow, defaultWindow
+	cs.tokens, cs.tokAt = ctlBurst, g.Now()
+	cs.onFieldFn = func(name, value []byte) { s.onField(cs, name, value) }
+}
+
+type protocol uint8
+
+const (
+	protoWait protocol = iota // not enough bytes yet
+	protoH2
+	protoH1
+)
+
+// decide says which protocol an undecided connection speaks. With TLS, ALPN is
+// authoritative once the ClientHello is in; a client that offered none is told
+// apart by its first bytes, like a cleartext connection.
+func (s *Server) decide(cs *conn) protocol {
+	if cs.tls != nil {
+		if !cs.tls.HelloReceived() {
+			return protoWait
+		}
+		switch cs.tls.ALPN() {
+		case "h2":
+			return protoH2
+		case "":
+			if !cs.tls.HandshakeComplete() {
+				return protoWait
+			}
+			s.pull(cs)
+		default:
+			return protoH1
+		}
+	}
+	n := min(cs.rlen, len(clientPreface))
+	switch {
+	case n == 0:
+		return protoWait
+	case string(cs.rbuf[:n]) != clientPreface[:n]:
+		return protoH1
+	case n == len(clientPreface):
+		return protoH2
+	}
+	return protoWait
+}
+
+// toH1 hands the connection, with everything read so far, to the HTTP/1.1 server.
+func (s *Server) toH1(cs *conn, g *gina.Ctx) gina.Effect {
+	h1c, eff := s.h1.Adopt(g, cs.fd, cs.tls, cs.cbuf, cs.rbuf[:cs.rlen])
+	st := s.sh(g)
+	st.putBuf(cs.rbuf, 4*s.cfg.MaxConns)
+	st.putBuf(cs.out, 4*s.cfg.MaxConns)
+	st.conns.Add(-1)
+	*cs = conn{h1c: h1c}
+	return eff
+}
+
 func (s *Server) closeConn(cs *conn, g *gina.Ctx) gina.Effect {
 	for _, st := range cs.tuns {
 		if t := st.tun; t != nil && !st.tunClosed {
 			st.tunClosed = true
 			t.Closed(g)
 		}
+	}
+	for _, st := range cs.streams {
+		st.abortBody()
+		st.closeSource()
+	}
+	for _, st := range cs.sendq { // streams the peer reset while their body was queued
+		st.closeSource()
 	}
 	g.CloseFD(cs.fd)
 	st, keep := s.sh(g), 4*s.cfg.MaxConns
@@ -178,6 +263,9 @@ func (s *Server) closeConn(cs *conn, g *gina.Ctx) gina.Effect {
 }
 
 func (s *Server) connHandler(cs *conn, g *gina.Ctx, m *gina.Message) gina.Effect {
+	if cs.h1c != nil {
+		return s.h1.Handle(cs.h1c, g, m)
+	}
 	cs.g = g
 	switch m.Tag {
 	case gina.TagIORecv:
@@ -198,6 +286,8 @@ func (s *Server) connHandler(cs *conn, g *gina.Ctx, m *gina.Message) gina.Effect
 		if cs.tls != nil {
 			if err := cs.tls.Feed(cs.cbuf[:n]); err != nil {
 				cs.dead, cs.closeAfter = true, true // a fatal alert (if any) is queued: send it, then close
+			} else if cs.tls.HandshakeComplete() && cs.tls.ALPN() == gtls.ACMETLS1 {
+				cs.dead, cs.closeAfter = true, true // a TLS-ALPN-01 validation: the handshake was the whole point
 			}
 		} else {
 			cs.rlen += int(n)
@@ -249,6 +339,16 @@ func (s *Server) onTimeout(cs *conn, g *gina.Ctx) gina.Effect {
 // parse and answer every complete frame, queue what flow control allows, then
 // send or wait for more input.
 func (s *Server) step(cs *conn, g *gina.Ctx) gina.Effect {
+	if cs.undecided && !cs.dead && !cs.closeAfter {
+		switch s.decide(cs) {
+		case protoWait:
+			return s.flushOrRecv(cs, g)
+		case protoH1:
+			return s.toH1(cs, g)
+		}
+		cs.undecided = false
+		s.initH2(cs, g)
+	}
 	if g.IsShuttingDown() && !cs.goneAway && cs.started {
 		s.shutdownTunnels(cs, g)
 		s.goAway(cs, errNo)
@@ -624,7 +724,7 @@ func (cs *conn) newStream(id uint32, recvWin int) *stream {
 	} else {
 		st = new(stream)
 	}
-	st.id, st.sendWin, st.recvWin, st.clen = id, cs.initWin, int64(recvWin), -1
+	st.id, st.sendWin, st.recvWin, st.clen, st.maxBody = id, cs.initWin, int64(recvWin), -1, 0
 	if st.hbuf == nil {
 		st.hbuf, cs.spare = cs.spare[:0], nil
 	}
@@ -639,6 +739,7 @@ func (cs *conn) drop(st *stream) {
 		return
 	}
 	st.closed = true
+	st.abortBody()
 	delete(cs.streams, st.id)
 	if st.tun != nil {
 		cs.untunnel(st)
@@ -648,7 +749,24 @@ func (cs *conn) drop(st *stream) {
 	}
 }
 
+// abortBody tells a streamed upload's handler that the request will not complete.
+func (st *stream) abortBody() {
+	if st.streaming {
+		st.streaming = false
+		st.sctx.AbortBody()
+	}
+}
+
+// closeSource releases a streamed body that is not being read to the end.
+func (st *stream) closeSource() {
+	if st.src != nil {
+		ghttp.CloseSource(st.src)
+		st.src = nil
+	}
+}
+
 func (cs *conn) release(st *stream) {
+	st.closeSource()
 	hbuf, hf, body, rb := st.hbuf[:0], st.hf[:0], st.body[:0], st.respBuf[:0]
 	if cap(hbuf) > 16<<10 {
 		hbuf = nil
@@ -789,6 +907,19 @@ func (s *Server) finishBlock(cs *conn, g *gina.Ctx) {
 	if cs.hbEnd {
 		st.recvEnded = true // set first: answering below may finish and recycle the stream
 	}
+	st.maxBody = s.cfg.MaxBodyBytes
+	if cs.curErr == hdrOK && s.router.HasRouteLimits() && st.method.end > st.method.off {
+		path := st.val(st.path)
+		if q := bytes.IndexByte(path, '?'); q >= 0 {
+			path = path[:q]
+		}
+		if max, _, stream, _ := s.router.BodyLimits(string(st.val(st.method)), path); max != 0 { // a route with its own limit
+			st.maxBody = max
+			st.streamBody = stream
+		} else if stream {
+			st.maxBody, st.streamBody = math.MaxInt, true // a streamed body is not buffered: no limit unless the route sets one
+		}
+	}
 	switch {
 	case cs.curErr == hdrMalformed || !st.validRequest():
 		s.streamErr(cs, st, errProtocol)
@@ -796,10 +927,12 @@ func (s *Server) finishBlock(cs *conn, g *gina.Ctx) {
 		s.reject(cs, g, st, 431) // answered; the rest of the request is ignored
 	case st.path.end-st.path.off > int32(s.cfg.MaxURIBytes):
 		s.reject(cs, g, st, 414)
-	case st.clen > int64(s.cfg.MaxBodyBytes):
+	case st.clen > int64(st.maxBody):
 		s.reject(cs, g, st, 413)
 	case cs.hbEnd || st.seen&seenProtocol != 0: // an extended CONNECT is answered now: its stream stays open
 		s.complete(cs, g, st)
+	case st.streamBody && st.clen != 0: // the route takes the body as a stream: run its handler now
+		s.beginStreamed(cs, g, st)
 	}
 	// st may have been answered and recycled by now: do not touch it again
 }
@@ -866,7 +999,11 @@ func (s *Server) onData(cs *conn, g *gina.Ctx, flags byte, id uint32, p []byte) 
 		}
 		return
 	}
-	if len(st.body)+len(data) > s.cfg.MaxBodyBytes {
+	if st.streaming {
+		s.streamedData(cs, g, st, flags, data)
+		return
+	}
+	if len(st.body)+len(data) > st.maxBody {
 		s.creditConn(cs)
 		s.reject(cs, g, st, 413) // st may be gone after this
 		return

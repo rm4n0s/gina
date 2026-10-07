@@ -25,11 +25,11 @@ import (
 	"os"
 	"time"
 
-	"gina"
-	ghttp "gina/extensions/http"
-	"gina/extensions/http2"
-	gtls "gina/extensions/tls"
-	ws "gina/extensions/websocket"
+	"github.com/rm4n0s/gina"
+	ghttp "github.com/rm4n0s/gina/extensions/http"
+	"github.com/rm4n0s/gina/extensions/http2"
+	gtls "github.com/rm4n0s/gina/extensions/tls"
+	ws "github.com/rm4n0s/gina/extensions/websocket"
 )
 
 const (

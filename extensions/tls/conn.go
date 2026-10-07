@@ -72,10 +72,14 @@ func NewServer(cfg *Config) (*Conn, error) {
 }
 
 func (c *Conn) HandshakeComplete() bool { return c.st == stConnected }
-func (c *Conn) ALPN() string            { return c.alpn }
-func (c *Conn) ServerName() string      { return c.sni }
-func (c *Conn) Err() error              { return c.err }
-func (c *Conn) PeerClosed() bool        { return c.eof }
+
+// HelloReceived reports whether the ClientHello has been processed, which is
+// when ALPN and ServerName become known.
+func (c *Conn) HelloReceived() bool { return c.st != stWaitClientHello }
+func (c *Conn) ALPN() string        { return c.alpn }
+func (c *Conn) ServerName() string  { return c.sni }
+func (c *Conn) Err() error          { return c.err }
+func (c *Conn) PeerClosed() bool    { return c.eof }
 func (c *Conn) CipherSuite() uint16 {
 	if c.suite == nil {
 		return 0
@@ -502,7 +506,10 @@ func (c *Conn) onClientHello(msg []byte) error {
 	}
 
 	// certificate and signature scheme
-	pc := c.cfg.pick(ch.sni)
+	pc, err := c.cfg.choose(ch)
+	if err != nil {
+		return alert(alertInternalError, err.Error())
+	}
 	var scheme uint16
 pickSig:
 	for _, mine := range pc.sigAlgs {

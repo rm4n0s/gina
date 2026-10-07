@@ -3,8 +3,8 @@ package websocket
 import (
 	"unicode/utf8"
 
-	"gina"
-	ghttp "gina/extensions/http"
+	"github.com/rm4n0s/gina"
+	ghttp "github.com/rm4n0s/gina/extensions/http"
 )
 
 // Pushes to a connection from another isolate, on any shard. They travel as Gina

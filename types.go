@@ -11,6 +11,7 @@ package gina
 
 import (
 	"fmt"
+	"net/netip"
 	"reflect"
 	"sync/atomic"
 	"unsafe"
@@ -337,11 +338,15 @@ const (
 	SubmitBadFD
 )
 
-// ListenSpec describes a TCP IPv4 listening socket. With ReusePort several
-// listeners (one per shard, or one per process) can bind the same port and the
-// kernel spreads incoming connections across them.
+// ListenSpec describes a TCP listening socket (IPv4 by default). With ReusePort
+// several listeners (one per shard, or one per process) can bind the same port
+// and the kernel spreads incoming connections across them.
 type ListenSpec struct {
-	Addr      [4]byte
+	Addr [4]byte
+	// IP, when valid, overrides Addr. An IPv4 address binds an IPv4 socket; an
+	// IPv6 address binds an IPv6 socket, and "::" is dual-stack (it also accepts
+	// IPv4 clients, reported as IPv4 addresses by PeerAddr).
+	IP        netip.Addr
 	Port      uint16 // 0 picks an ephemeral port; read it back with ctx.LocalPort
 	ReusePort bool
 	Backlog   int // default 1024

@@ -22,8 +22,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"gina"
-	ghttp "gina/extensions/http"
+	"github.com/rm4n0s/gina"
+	ghttp "github.com/rm4n0s/gina/extensions/http"
 )
 
 const (

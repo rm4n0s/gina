@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"gina"
+	"github.com/rm4n0s/gina"
 )
 
 const (

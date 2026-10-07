@@ -58,7 +58,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	ghttp "gina/extensions/http"
+	ghttp "github.com/rm4n0s/gina/extensions/http"
 )
 
 // MailboxCapacity is a sensible ConnMailbox for the HTTP servers when many pushes
@@ -72,6 +72,17 @@ type Config struct {
 	OnMessage func(c *Conn, op Opcode, data []byte)     // a complete text or binary message
 	OnPong    func(c *Conn, data []byte)                // a pong arrived
 	OnClose   func(c *Conn, code uint16, reason []byte) // the connection ended: code is the peer's, ours, or CloseAbnormal
+
+	// OnOverflow is called when a subscriber has fallen too far behind to be
+	// served: messages pushed to it were dropped (its mailbox was full, or the
+	// shard's message pool) or its unsent output reached MaxQueued. lost is how
+	// many are known to be missing (at least 1). It runs before the connection
+	// would otherwise carry on with a gap in its stream. The default closes with
+	// CloseTryAgainLater; do the same with a reason the client understands
+	// (c.Close(CloseTryAgainLater, `{"reconnect":true}`)), or resynchronise the
+	// client some other way. If the queue is full, a Send here fails with
+	// ErrQueueFull, but Close always works.
+	OnOverflow func(c *Conn, lost int)
 
 	// Subprotocols the server speaks, in no particular order; the first one the
 	// client offered (in the client's order) is selected. None offered, or none

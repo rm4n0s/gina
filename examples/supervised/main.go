@@ -6,7 +6,7 @@ package main
 import (
 	"fmt"
 
-	"gina"
+	"github.com/rm4n0s/gina"
 )
 
 const (

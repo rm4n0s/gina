@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"gina"
-	ghttp "gina/extensions/http"
-	"gina/extensions/http2"
-	ws "gina/extensions/websocket"
+	"github.com/rm4n0s/gina"
+	ghttp "github.com/rm4n0s/gina/extensions/http"
+	"github.com/rm4n0s/gina/extensions/http2"
+	ws "github.com/rm4n0s/gina/extensions/websocket"
 )
 
 // forAll runs a test over every way a WebSocket can reach the server.
@@ -432,6 +432,7 @@ const (
 	tagLeave  = gina.TagUserBase + 0x71
 	tagBcast  = gina.TagUserBase + 0x72
 	tagShare  = gina.TagUserBase + 0x73
+	tagFlood  = gina.TagUserBase + 0x74
 	hubShard  = 1
 	typeCount = 1
 )
@@ -467,6 +468,12 @@ func hubHandler(h *hub, g *gina.Ctx, m *gina.Message) gina.Effect {
 		for _, p := range h.peers {
 			ws.PushText(g, p, string(g.Data()))
 		}
+	case tagFlood: // 200 pushes to each peer within one turn: more than a small mailbox holds
+		for _, p := range h.peers {
+			for i := 0; i < 200; i++ {
+				ws.PushText(g, p, fmt.Sprintf("f%03d", i))
+			}
+		}
 	case tagShare: // one copy for all
 		sh, _ := ws.NewShared(ws.OpText, g.Data())
 		for _, p := range h.peers {
@@ -497,6 +504,10 @@ func hubConfig() ws.Config {
 		OnMessage: func(c *ws.Conn, op ws.Opcode, data []byte) {
 			if rest, ok := bytes.CutPrefix(data, []byte("bcast ")); ok {
 				c.Gina().SendRaw(hubH, tagBcast, rest)
+				return
+			}
+			if bytes.Equal(data, []byte("flood")) {
+				c.Gina().SendRaw(hubH, tagFlood, nil)
 				return
 			}
 			if rest, ok := bytes.CutPrefix(data, []byte("share ")); ok {

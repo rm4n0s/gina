@@ -26,8 +26,10 @@ import (
 	ctls "crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"errors"
 	"math/big"
+	"sync/atomic"
 	"time"
 )
 
@@ -61,19 +63,47 @@ func findSuite(id uint16) *suite {
 	return nil
 }
 
-// Config configures a server connection. It must not be modified after first use.
+// Config configures a server connection. Its settings must not be modified
+// after first use, with one exception: the certificates can be replaced at any
+// time, from any goroutine, with SetCertificates.
 type Config struct {
 	// Certificates are tried in order; the first whose leaf matches the client's
-	// SNI is used, else the first one. At least one is required.
+	// SNI is used, else the first one. At least one is required unless
+	// GetCertificate is set.
 	Certificates []ctls.Certificate
+	// GetCertificate, when set, is asked for the certificate of every handshake
+	// before Certificates are consulted. Return (nil, nil) to fall back to them.
+	// It runs on the shard thread inside the handshake, so it must be quick,
+	// must not block, and is called from several threads at once: keep the
+	// certificates ready in an atomic.Pointer and return a *Certificate made
+	// once with NewCertificate (never parse one per call). Typical uses:
+	// per-domain certificates and answering TLS-ALPN-01 challenges.
+	GetCertificate func(*ClientHelloInfo) (*Certificate, error)
 	// NextProtos is the ALPN list in server preference order (default "http/1.1").
-	// If the client offers ALPN and nothing matches, the handshake fails.
+	// If the client offers ALPN and nothing matches, the handshake fails. Add
+	// ACMETLS1 to answer TLS-ALPN-01 challenges (see ALPNChallengeCertificate);
+	// the HTTP servers close such a connection once its handshake is done.
 	NextProtos []string
 	// CipherSuites in server preference order (default AES-128-GCM, AES-256-GCM).
 	CipherSuites []uint16
 
 	prepared bool
-	certs    []preparedCert
+	store    *certStore // shared by copies made with WithNextProtos
+}
+
+// ACMETLS1 is the ALPN protocol of TLS-ALPN-01 validation connections (RFC 8737).
+const ACMETLS1 = "acme-tls/1"
+
+// ClientHelloInfo is what GetCertificate may base its choice on. The slices are
+// only valid during the call.
+type ClientHelloInfo struct {
+	ServerName       string   // SNI ("" if none)
+	SupportedProtos  []string // the client's ALPN offer
+	SignatureSchemes []uint16 // the client's signature_algorithms
+}
+
+type certStore struct {
+	set atomic.Pointer[[]preparedCert]
 }
 
 type preparedCert struct {
@@ -83,13 +113,74 @@ type preparedCert struct {
 	sigAlgs []uint16
 }
 
+// Certificate is a certificate prepared for handshakes (leaf parsed, signature
+// schemes worked out). Make it once, at load time; it is safe for concurrent use.
+type Certificate struct{ pc preparedCert }
+
+// NewCertificate prepares a certificate chain and key for use in handshakes.
+func NewCertificate(c ctls.Certificate) (*Certificate, error) {
+	pc, err := prepareCert(c)
+	if err != nil {
+		return nil, err
+	}
+	return &Certificate{pc}, nil
+}
+
+func prepareCert(in ctls.Certificate) (preparedCert, error) {
+	cert := &in
+	if len(cert.Certificate) == 0 {
+		return preparedCert{}, errors.New("tls: certificate has no chain")
+	}
+	signer, ok := cert.PrivateKey.(crypto.Signer)
+	if !ok {
+		return preparedCert{}, errors.New("tls: certificate private key cannot sign")
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return preparedCert{}, err
+	}
+	var algs []uint16
+	switch pub := signer.Public().(type) {
+	case *ecdsa.PublicKey:
+		switch pub.Curve {
+		case elliptic.P256():
+			algs = []uint16{sigECDSAP256}
+		case elliptic.P384():
+			algs = []uint16{sigECDSAP384}
+		case elliptic.P521():
+			algs = []uint16{sigECDSAP521}
+		}
+	case ed25519.PublicKey:
+		algs = []uint16{sigEd25519}
+	case *rsa.PublicKey:
+		algs = []uint16{sigPSSSHA256, sigPSSSHA384, sigPSSSHA512}
+	}
+	if algs == nil {
+		return preparedCert{}, errors.New("tls: unsupported private key type")
+	}
+	return preparedCert{cert: cert, leaf: leaf, signer: signer, sigAlgs: algs}, nil
+}
+
+func prepareCerts(in []ctls.Certificate) ([]preparedCert, error) {
+	out := make([]preparedCert, 0, len(in))
+	for _, c := range in {
+		pc, err := prepareCert(c)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, pc)
+	}
+	return out, nil
+}
+
 // Validate checks and prepares the configuration; it is called automatically by
-// NewServer, but call it at startup to fail fast.
+// NewServer, but call it at startup to fail fast (the servers' Install does).
+// It is not safe to call concurrently with the first handshakes.
 func (c *Config) Validate() error {
 	if c.prepared {
 		return nil
 	}
-	if len(c.Certificates) == 0 {
+	if len(c.Certificates) == 0 && c.GetCertificate == nil {
 		return errors.New("tls: no certificates")
 	}
 	if len(c.NextProtos) == 0 {
@@ -103,55 +194,71 @@ func (c *Config) Validate() error {
 			return errors.New("tls: unsupported cipher suite (only TLS_AES_128_GCM_SHA256 and TLS_AES_256_GCM_SHA384)")
 		}
 	}
-	c.certs = nil
-	for i := range c.Certificates {
-		cert := &c.Certificates[i]
-		if len(cert.Certificate) == 0 {
-			return errors.New("tls: certificate has no chain")
-		}
-		signer, ok := cert.PrivateKey.(crypto.Signer)
-		if !ok {
-			return errors.New("tls: certificate private key cannot sign")
-		}
-		leaf, err := x509.ParseCertificate(cert.Certificate[0])
-		if err != nil {
-			return err
-		}
-		var algs []uint16
-		switch pub := signer.Public().(type) {
-		case *ecdsa.PublicKey:
-			switch pub.Curve {
-			case elliptic.P256():
-				algs = []uint16{sigECDSAP256}
-			case elliptic.P384():
-				algs = []uint16{sigECDSAP384}
-			case elliptic.P521():
-				algs = []uint16{sigECDSAP521}
-			}
-		case ed25519.PublicKey:
-			algs = []uint16{sigEd25519}
-		case *rsa.PublicKey:
-			algs = []uint16{sigPSSSHA256, sigPSSSHA384, sigPSSSHA512}
-		}
-		if algs == nil {
-			return errors.New("tls: unsupported private key type")
-		}
-		c.certs = append(c.certs, preparedCert{cert: cert, leaf: leaf, signer: signer, sigAlgs: algs})
+	certs, err := prepareCerts(c.Certificates)
+	if err != nil {
+		return err
 	}
+	c.store = &certStore{}
+	c.store.set.Store(&certs)
 	c.prepared = true
 	return nil
 }
 
-// pick chooses the certificate for an SNI name (first match, else the first).
-func (c *Config) pick(sni string) *preparedCert {
-	if sni != "" {
-		for i := range c.certs {
-			if c.certs[i].leaf.VerifyHostname(sni) == nil {
-				return &c.certs[i]
+// SetCertificates atomically replaces the certificates used for new handshakes
+// (renewal without a restart). Connections already established keep what they
+// negotiated. Safe to call from any goroutine once the config has been
+// validated (the servers do that in Install). The old Certificates field is not
+// updated.
+func (c *Config) SetCertificates(certs ...ctls.Certificate) error {
+	if !c.prepared {
+		return errors.New("tls: SetCertificates before Validate (the server's Install validates the config)")
+	}
+	p, err := prepareCerts(certs)
+	if err != nil {
+		return err
+	}
+	if len(p) == 0 && c.GetCertificate == nil {
+		return errors.New("tls: no certificates")
+	}
+	c.store.set.Store(&p)
+	return nil
+}
+
+// WithNextProtos validates c and returns a copy that offers different ALPN
+// protocols but shares c's certificate store, so SetCertificates on either one
+// reaches both.
+func (c *Config) WithNextProtos(protos ...string) (*Config, error) {
+	if err := c.Validate(); err != nil {
+		return nil, err
+	}
+	return &Config{Certificates: c.Certificates, GetCertificate: c.GetCertificate, NextProtos: protos,
+		CipherSuites: c.CipherSuites, prepared: true, store: c.store}, nil
+}
+
+// choose selects the certificate for a ClientHello: GetCertificate first, then
+// the first static certificate matching the SNI, else the first one.
+func (c *Config) choose(ch *clientHello) (*preparedCert, error) {
+	if c.GetCertificate != nil {
+		cert, err := c.GetCertificate(&ClientHelloInfo{ServerName: ch.sni, SupportedProtos: ch.alpn, SignatureSchemes: ch.sigAlgs})
+		if err != nil {
+			return nil, err
+		}
+		if cert != nil {
+			return &cert.pc, nil
+		}
+	}
+	certs := *c.store.set.Load()
+	if len(certs) == 0 {
+		return nil, errors.New("no certificate for this client")
+	}
+	if ch.sni != "" {
+		for i := range certs {
+			if certs[i].leaf.VerifyHostname(ch.sni) == nil {
+				return &certs[i], nil
 			}
 		}
 	}
-	return &c.certs[0]
+	return &certs[0], nil
 }
 
 func sign(key crypto.Signer, scheme uint16, content []byte) ([]byte, error) {
@@ -247,4 +354,38 @@ func parseIP(s string) []byte {
 		return nil
 	}
 	return ip[:]
+}
+
+// ALPNChallengeCertificate builds the certificate a TLS-ALPN-01 validation
+// connection must be answered with (RFC 8737 §3): self-signed, valid for domain,
+// carrying the critical acmeIdentifier extension with the SHA-256 of the key
+// authorization your ACME client computed. Return it from GetCertificate when the
+// ClientHello offers only ACMETLS1 (and list ACMETLS1 in Config.NextProtos).
+func ALPNChallengeCertificate(domain, keyAuthorization string) (*Certificate, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	digest := sha256.Sum256([]byte(keyAuthorization))
+	val, err := asn1.Marshal(digest[:]) // an OCTET STRING holding the digest
+	if err != nil {
+		return nil, err
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: domain},
+		DNSNames:     []string{domain},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		ExtraExtensions: []pkix.Extension{{
+			Id: asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 1, 31}, Critical: true, Value: val,
+		}},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
+	if err != nil {
+		return nil, err
+	}
+	return NewCertificate(ctls.Certificate{Certificate: [][]byte{der}, PrivateKey: key})
 }

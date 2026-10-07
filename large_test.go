@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"gina"
+	"github.com/rm4n0s/gina"
 )
 
 const (

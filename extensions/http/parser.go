@@ -6,10 +6,14 @@
 //
 // Handlers run synchronously inside the connection isolate's turn and may use
 // Context.Gina() to message other isolates. Request bodies must carry
-// Content-Length (chunked request bodies are rejected with 501).
+// Content-Length or be sent chunked (decoded before the handler runs, up to the
+// body limit); other transfer codings are rejected with 501.
 package http
 
-import "bytes"
+import (
+	"bytes"
+	"math"
+)
 
 // Header is one request header; both slices alias the connection's read buffer
 // and are only valid during the handler call.
@@ -25,13 +29,15 @@ type Request struct {
 	Minor         int    // HTTP/1.<Minor>
 	Headers       []Header
 	Body          []byte
-	ContentLength int
+	ContentLength int // length of Body
 	KeepAlive     bool
 	// Protocol is the :protocol pseudo-header of an HTTP/2 extended CONNECT
 	// (RFC 8441), e.g. "websocket". Such a request is presented with Method "GET"
 	// so that one route serves both HTTP versions. Nil on HTTP/1.1 and on
 	// ordinary HTTP/2 requests.
 	Protocol []byte
+
+	ro *route // HTTP/1.1: the route's own limits, when it has any (see Route)
 }
 
 // Header returns the first value of a header (case-insensitive) or nil.
@@ -68,10 +74,15 @@ type parseState uint8
 const (
 	psMore parseState = iota // need more bytes
 	psOK
-	psErr // status holds the HTTP error code to answer with
+	psErr     // status holds the HTTP error code to answer with
+	psStream  // headers complete, the route takes its body as a stream: begin the exchange (consumed is the head length)
+	psChunked // headers complete, the body is chunked: decode it (consumed is the head length, req has no Body yet)
 )
 
-type limits struct{ maxHeaderBytes, maxURI, maxBody int }
+type limits struct {
+	maxHeaderBytes, maxURI, maxBody int
+	router                          *Router // per-route body limits; nil when there are none
+}
 
 var crlf2 = []byte("\r\n\r\n")
 
@@ -252,7 +263,8 @@ func parseRequest(buf []byte, from int, lim *limits, req *Request, hdrs []Header
 	pos := lineEnd + 2
 	var (
 		contentLength = -1
-		hasTE         bool
+		tes           int // Transfer-Encoding headers
+		chunked       bool
 		hosts         int
 		closeTok      bool
 		keepTok       bool
@@ -290,7 +302,8 @@ func parseRequest(buf []byte, from int, lim *limits, req *Request, hdrs []Header
 			}
 			contentLength = n
 		case equalFold(name, "transfer-encoding"):
-			hasTE = true
+			tes++
+			chunked = equalFold(value, "chunked")
 		case equalFold(name, "host"):
 			hosts++
 		case equalFold(name, "connection"):
@@ -299,11 +312,13 @@ func parseRequest(buf []byte, from int, lim *limits, req *Request, hdrs []Header
 			keepTok = keepTok || k
 		}
 	}
-	if hasTE {
-		if contentLength >= 0 {
-			return psErr, 0, 0, 400 // request smuggling shape
+	if tes > 0 {
+		switch {
+		case contentLength >= 0, tes > 1, minor == 0:
+			return psErr, 0, 0, 400 // request smuggling shapes
+		case !chunked:
+			return psErr, 0, 0, 501 // some other transfer coding
 		}
-		return psErr, 0, 0, 501
 	}
 	if hosts > 1 || (minor == 1 && hosts == 0) {
 		return psErr, 0, 0, 400
@@ -311,19 +326,51 @@ func parseRequest(buf []byte, from int, lim *limits, req *Request, hdrs []Header
 	if contentLength < 0 {
 		contentLength = 0
 	}
-	if contentLength > lim.maxBody {
+	path := target
+	if q := bytes.IndexByte(target, '?'); q >= 0 {
+		path = target[:q]
+	}
+	maxBody := lim.maxBody
+	var ro *route
+	if lim.router != nil && lim.router.limited && (contentLength > 0 || chunked) {
+		if ro = lim.router.find(method, path); ro != nil {
+			if ro.maxBody != 0 {
+				maxBody = ro.maxBody
+			} else if ro.stream {
+				maxBody = math.MaxInt // a streamed body is not buffered: no limit unless the route sets one
+			}
+		}
+	}
+	if chunked {
+		*req = Request{Method: method, Target: target, Path: path, Minor: minor, Headers: hdrs, ContentLength: -1,
+			KeepAlive: !closeTok && (minor == 1 || keepTok), ro: ro}
+		if path != nil && len(path) < len(target) {
+			req.Query = target[len(path)+1:]
+		}
+		return psChunked, headEnd, 0, 0
+	}
+	if contentLength > maxBody {
 		return psErr, 0, 0, 413
 	}
+	if ro != nil && ro.stream && contentLength > 0 {
+		*req = Request{Method: method, Target: target, Path: path, Minor: minor, Headers: hdrs, ContentLength: contentLength,
+			KeepAlive: !closeTok && (minor == 1 || keepTok), ro: ro}
+		if len(path) < len(target) {
+			req.Query = target[len(path)+1:]
+		}
+		return psStream, headEnd, 0, 0
+	}
 	if total := headEnd + contentLength; len(buf) < total {
+		req.ro = ro // recv() needs the route's read timeout while the body arrives
 		return psMore, 0, total, 0
 	}
 	*req = Request{
 		Method: method, Target: target, Minor: minor, Headers: hdrs, ContentLength: contentLength,
 		Body:      buf[headEnd : headEnd+contentLength],
-		KeepAlive: !closeTok && (minor == 1 || keepTok),
+		KeepAlive: !closeTok && (minor == 1 || keepTok), ro: ro,
 	}
-	if q := bytes.IndexByte(target, '?'); q >= 0 {
-		req.Path, req.Query = target[:q], target[q+1:]
+	if len(path) < len(target) {
+		req.Path, req.Query = path, target[len(path)+1:]
 	} else {
 		req.Path = target
 	}

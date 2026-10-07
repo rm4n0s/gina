@@ -33,6 +33,7 @@ const (
 	CloseTooBig          uint16 = 1009
 	CloseMandatoryExt    uint16 = 1010
 	CloseInternalError   uint16 = 1011
+	CloseTryAgainLater   uint16 = 1013
 )
 
 var (

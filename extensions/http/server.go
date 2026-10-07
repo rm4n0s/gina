@@ -2,22 +2,26 @@ package http
 
 import (
 	"errors"
+	"io"
+	"math"
+	"net/netip"
 	"strconv"
 	"sync/atomic"
 	"syscall"
 	"time"
 
-	"gina"
-	gtls "gina/extensions/tls"
+	"github.com/rm4n0s/gina"
+	gtls "github.com/rm4n0s/gina/extensions/tls"
 )
 
 // Config configures a Server. Zero values take the documented defaults; for the
 // timeouts a negative value disables the timeout.
 type Config struct {
-	Addr      [4]byte // default 0.0.0.0
-	Port      uint16  // 0 = ephemeral (each shard gets its own; read with Port())
-	ReusePort bool    // SO_REUSEPORT: every shard binds the same port
-	Backlog   int     // default 1024
+	Addr      [4]byte    // default 0.0.0.0
+	IP        netip.Addr // when valid, overrides Addr: an IPv6 address (or "::", dual-stack) listens on IPv6
+	Port      uint16     // 0 = ephemeral (each shard gets its own; read with Port())
+	ReusePort bool       // SO_REUSEPORT: every shard binds the same port
+	Backlog   int        // default 1024
 
 	MaxConns       int // per shard (default 1024); further connections are accepted and closed
 	ReadBufSize    int // initial per-connection buffer (default 4096); grows up to header+body limits
@@ -88,6 +92,7 @@ type shardState struct {
 	conns              atomic.Int64
 	port               atomic.Uint32
 	bufs               [][]byte
+	freeConns          []*Conn // adopted-connection wrappers ready for reuse
 	dateSec            int64
 	dateBuf            []byte
 	_                  [64]byte // keep neighbouring shards' counters off one cache line
@@ -95,7 +100,7 @@ type shardState struct {
 
 func New(cfg Config, r *Router) *Server {
 	cfg.defaults()
-	return &Server{cfg: cfg, router: r, lim: limits{cfg.MaxHeaderBytes, cfg.MaxURIBytes, cfg.MaxBodyBytes}}
+	return &Server{cfg: cfg, router: r, lim: limits{cfg.MaxHeaderBytes, cfg.MaxURIBytes, cfg.MaxBodyBytes, r}}
 }
 
 // Port returns the port a shard's listener bound (0 before it started).
@@ -175,7 +180,7 @@ type listener struct{ fd gina.FDHandle }
 const tagBackoff = gina.TagUserBase
 
 func (s *Server) listenerInit(l *listener, g *gina.Ctx, _ []byte) gina.Effect {
-	fd, err := g.Listen(gina.ListenSpec{Addr: s.cfg.Addr, Port: s.cfg.Port, ReusePort: s.cfg.ReusePort, Backlog: s.cfg.Backlog})
+	fd, err := g.Listen(gina.ListenSpec{Addr: s.cfg.Addr, IP: s.cfg.IP, Port: s.cfg.Port, ReusePort: s.cfg.ReusePort, Backlog: s.cfg.Backlog})
 	if err != nil {
 		s.setListenErr(err)
 		return gina.Crash(gina.FaultInitFailed)
@@ -244,6 +249,15 @@ type connState struct {
 	tunShut     bool        // tun.Shutdown has been called
 	tunNotified bool        // TLS close_notify queued
 	tunSent     int         // plaintext tunnel only: bytes of tun.Outgoing() in the send that is in flight
+	ck          chunkState  // a chunked request body in progress
+	owner       *Conn       // adopted connection: the wrapper to recycle on close
+	streaming   bool        // a request body is being delivered to c.onBody (Route.StreamBody); the head stays in rbuf[:bodyAt]
+	bodyChunked bool
+	bodyAt      int       // where the body bytes start in rbuf
+	bodyLeft    int64     // Content-Length bodies: bytes still to come
+	src         io.Reader // a response body being read and sent in pieces (Context.SendReader)
+	srcLeft     int64     // bytes of it still to send; -1 = until EOF
+	srcChunked  bool      // frame the pieces with chunked transfer coding
 	req         Request
 	hdrs        [64]Header
 	c           Context
@@ -284,11 +298,19 @@ func (s *Server) connInit(cs *connState, g *gina.Ctx, _ []byte) gina.Effect {
 }
 
 func (s *Server) closeConn(cs *connState, g *gina.Ctx) gina.Effect {
+	if cs.streaming { // the upload ended without its last piece: tell the handler so it can clean up
+		cs.streaming = false
+		cs.c.AbortBody()
+	}
 	if cs.tun != nil && cs.tunOpen {
 		cs.tunOpen = false
 		cs.tun.Closed(g)
 	}
 	cs.tun = nil
+	if cs.src != nil {
+		CloseSource(cs.src)
+		cs.src = nil
+	}
 	if cs.stream && cs.notify != 0 {
 		self := g.Self()
 		gina.Send(g, cs.notify, TagStreamClosed, &self)
@@ -300,6 +322,10 @@ func (s *Server) closeConn(cs *connState, g *gina.Ctx) gina.Effect {
 	st.putBuf(cs.cbuf, keep)
 	cs.rbuf, cs.wbuf, cs.cbuf, cs.tls = nil, nil, nil, nil
 	st.conns.Add(-1)
+	if o := cs.owner; o != nil && len(st.freeConns) < keep {
+		*cs = connState{} // drop every reference before the wrapper waits in the pool
+		st.freeConns = append(st.freeConns, o)
+	}
 	return gina.Done()
 }
 
@@ -318,8 +344,10 @@ func (s *Server) recv(cs *connState, g *gina.Ctx) gina.Effect {
 	switch {
 	case cs.tls != nil && !cs.tls.HandshakeComplete():
 		timeout = timeoutOr0(s.cfg.ReadTimeout)
-	case cs.rlen > 0 && s.cfg.ReadTimeout > 0:
-		rem := s.cfg.ReadTimeout - time.Duration(g.Now()-cs.reqStart)
+	case cs.streaming: // a streamed body is bounded by inactivity, not by a deadline for the whole request
+		timeout = timeoutOr0(s.readTimeout(cs))
+	case cs.rlen > 0 && s.readTimeout(cs) > 0:
+		rem := s.readTimeout(cs) - time.Duration(g.Now()-cs.reqStart)
 		if rem <= 0 {
 			return s.fail(cs, g, 408)
 		}
@@ -335,6 +363,14 @@ func (s *Server) recv(cs *connState, g *gina.Ctx) gina.Effect {
 	return gina.WaitIO()
 }
 
+// readTimeout is the time the current request may take: its route's, else the server's.
+func (s *Server) readTimeout(cs *connState) time.Duration {
+	if ro := cs.req.ro; ro != nil && ro.readTimeout != 0 {
+		return ro.readTimeout
+	}
+	return s.cfg.ReadTimeout
+}
+
 func (s *Server) connHandler(cs *connState, g *gina.Ctx, m *gina.Message) gina.Effect {
 	switch m.Tag {
 	case gina.TagIORecv:
@@ -342,7 +378,7 @@ func (s *Server) connHandler(cs *connState, g *gina.Ctx, m *gina.Message) gina.E
 		if cs.tun != nil {
 			return s.tunRecv(cs, g, n)
 		}
-		if n == -int64(syscall.ETIMEDOUT) && cs.rlen > 0 {
+		if n == -int64(syscall.ETIMEDOUT) && (cs.rlen > 0 || cs.streaming) {
 			return s.fail(cs, g, 408)
 		}
 		if n <= 0 { // EOF, error, idle timeout or cancelled
@@ -351,6 +387,11 @@ func (s *Server) connHandler(cs *connState, g *gina.Ctx, m *gina.Message) gina.E
 		if cs.tls != nil {
 			if err := cs.tls.Feed(cs.cbuf[:n]); err != nil {
 				cs.closeAfter = true // a fatal alert (if any) is queued: send it, then close
+				return s.flush(cs, g)
+			}
+			if cs.tls.HandshakeComplete() && cs.tls.ALPN() == gtls.ACMETLS1 {
+				cs.closeAfter = true // a TLS-ALPN-01 validation: the handshake was the whole point
+				cs.tls.CloseNotify()
 				return s.flush(cs, g)
 			}
 			if cs.tls.OutLen() > 0 { // handshake flight or KeyUpdate answer
@@ -379,6 +420,12 @@ func (s *Server) connHandler(cs *connState, g *gina.Ctx, m *gina.Message) gina.E
 		}
 		if cs.tun != nil {
 			return s.tunFlush(cs, g)
+		}
+		if cs.src != nil { // a streamed body: the previous piece is out, send the next
+			if g.IsShuttingDown() || !s.fillChunk(cs, g, 0) {
+				return s.closeConn(cs, g)
+			}
+			return s.sendResponse(cs, g)
 		}
 		if cs.closeAfter || g.IsShuttingDown() {
 			return s.closeConn(cs, g)
@@ -446,6 +493,9 @@ func (s *Server) pull(cs *connState, g *gina.Ctx) {
 
 // process parses buffered bytes: answer a complete request, or ask for more.
 func (s *Server) process(cs *connState, g *gina.Ctx) gina.Effect {
+	if cs.streaming {
+		return s.feedBody(cs, g)
+	}
 	var st parseState
 	var consumed, need, status int
 	for {
@@ -458,6 +508,28 @@ func (s *Server) process(cs *connState, g *gina.Ctx) gina.Effect {
 			return s.recv(cs, g)
 		}
 		st, consumed, need, status = parseRequest(cs.rbuf[:cs.rlen], cs.scanned, &s.lim, &cs.req, cs.hdrs[:0])
+		if st == psChunked && cs.req.ro != nil && cs.req.ro.stream {
+			st = psStream
+		}
+		if st == psStream {
+			return s.beginStream(cs, g, consumed)
+		}
+		if st == psChunked {
+			st, consumed, status = s.chunkBody(cs, consumed)
+			if st == psMore {
+				if cs.rlen == len(cs.rbuf) { // full of decoded data: make room
+					limit := consumed + s.maxBody(cs) + maxChunkLine + 2
+					if len(cs.rbuf) >= limit {
+						return s.fail(cs, g, 413)
+					}
+					cs.rbuf = grow(cs.rbuf, min(2*len(cs.rbuf), limit))
+				}
+				if cs.tls != nil && cs.tls.PlainLen() > 0 {
+					continue // decrypted bytes are already waiting
+				}
+				return s.recv(cs, g)
+			}
+		}
 		if st != psMore {
 			break
 		}
@@ -480,9 +552,18 @@ func (s *Server) process(cs *connState, g *gina.Ctx) gina.Effect {
 	}
 	c := &cs.c
 	c.reset(g, &cs.req)
-	c.tls = cs.tls
+	c.tls, c.fd = cs.tls, cs.fd
 	s.dispatch(c)
+	return s.finish(cs, g, consumed)
+}
+
+// finish sends the response the handler left in the Context. consumed is how many
+// bytes at the front of rbuf the request took (its head and body); whatever
+// follows is the next, pipelined request.
+func (s *Server) finish(cs *connState, g *gina.Ctx, consumed int) gina.Effect {
+	c := &cs.c
 	cs.requests++
+	cs.ck, cs.req.ro = chunkState{}, nil
 	ss := s.sh(g)
 	ss.requests.Add(1)
 	cs.closeAfter = !cs.req.KeepAlive || c.close || g.IsShuttingDown() ||
@@ -494,7 +575,19 @@ func (s *Server) process(cs *connState, g *gina.Ctx) gina.Effect {
 		cs.tun, cs.closeAfter = c.tunnel, g.IsShuttingDown()
 	}
 	c.tunnel = nil
-	s.buildResponse(cs, cs.req.Method == "HEAD", ss)
+	if c.src != nil && c.srcSize < 0 && cs.req.Minor == 0 {
+		cs.closeAfter = true // no chunked coding in HTTP/1.0: the body ends when the connection does
+	}
+	head := cs.req.Method == "HEAD"
+	s.buildResponse(cs, head, ss)
+	if c.src != nil {
+		if head || !bodyAllowed(c.status) {
+			c.dropSource()
+		} else {
+			cs.src, c.src = c.src, nil
+			cs.srcLeft, cs.srcChunked = c.srcSize, c.srcSize < 0 && cs.req.Minor == 1
+		}
+	}
 	copy(cs.rbuf, cs.rbuf[consumed:cs.rlen]) // keep pipelined bytes, after the response is built
 	cs.rlen -= consumed
 	cs.scanned = 0
@@ -502,7 +595,43 @@ func (s *Server) process(cs *connState, g *gina.Ctx) gina.Effect {
 	if cs.rlen > 0 {
 		cs.reqStart = g.Now()
 	}
+	if cs.src != nil && !s.fillChunk(cs, g, len(cs.wbuf)) { // the first piece goes out with the headers
+		return s.closeConn(cs, g)
+	}
 	return s.sendResponse(cs, g)
+}
+
+// maxBody is the largest body the current request may have.
+func (s *Server) maxBody(cs *connState) int {
+	if ro := cs.req.ro; ro != nil {
+		if ro.maxBody != 0 {
+			return ro.maxBody
+		}
+		if ro.stream {
+			return math.MaxInt
+		}
+	}
+	return s.lim.maxBody
+}
+
+// chunkBody decodes whatever chunked body bytes have arrived (after the head, which
+// is headEnd long). It returns psOK with the request complete and consumed set to
+// the end of its body, psMore to wait for more bytes, or psErr.
+func (s *Server) chunkBody(cs *connState, headEnd int) (parseState, int, int) {
+	ck := &cs.ck
+	start := headEnd + ck.body
+	raw := cs.rbuf[start:cs.rlen]
+	i, w, done, status := ck.decode(raw, s.maxBody(cs), s.lim.maxHeaderBytes)
+	if status != 0 {
+		return psErr, 0, status
+	}
+	cs.rlen = start + w + (len(raw) - i)
+	if !done {
+		return psMore, headEnd, 0
+	}
+	cs.req.Body = cs.rbuf[headEnd : headEnd+ck.body]
+	cs.req.ContentLength = ck.body
+	return psOK, headEnd + ck.body, 0
 }
 
 // sendResponse sends cs.wbuf, through TLS when enabled.
@@ -511,7 +640,7 @@ func (s *Server) sendResponse(cs *connState, g *gina.Ctx) gina.Effect {
 		if err := cs.tls.Write(cs.wbuf); err != nil {
 			return s.closeConn(cs, g)
 		}
-		if cs.closeAfter {
+		if cs.closeAfter && cs.src == nil {
 			cs.tls.CloseNotify()
 		}
 		return s.flush(cs, g)
@@ -574,6 +703,15 @@ func (s *Server) buildResponse(cs *connState, head bool, st *shardState) {
 		}
 		if c.stream { // open-ended: the body is delimited by the connection closing
 			w = append(w, "Cache-Control: no-cache\r\n"...)
+		} else if c.src != nil {
+			switch {
+			case c.srcSize >= 0:
+				w = append(w, "Content-Length: "...)
+				w = strconv.AppendInt(w, c.srcSize, 10)
+				w = append(w, "\r\n"...)
+			case cs.req.Minor == 1:
+				w = append(w, "Transfer-Encoding: chunked\r\n"...)
+			} // HTTP/1.0 without a length: delimited by the connection closing
 		} else {
 			w = append(w, "Content-Length: "...)
 			w = strconv.AppendInt(w, int64(len(c.body)), 10)
@@ -591,6 +729,156 @@ func (s *Server) buildResponse(cs *connState, head bool, st *shardState) {
 		w = append(w, c.body...)
 	}
 	cs.wbuf = w
+}
+
+// ---- streamed request bodies ----
+
+// beginStream starts a request whose route takes its body as a stream: the
+// handler runs now, with the headers, and registers the callback that gets the
+// body. The head stays in rbuf[:headEnd] (Request aliases it) and body bytes are
+// processed behind it.
+func (s *Server) beginStream(cs *connState, g *gina.Ctx, headEnd int) gina.Effect {
+	c := &cs.c
+	c.reset(g, &cs.req)
+	c.tls, c.fd = cs.tls, cs.fd
+	s.router.DispatchStream(c)
+	if !c.HasBodyHandler() { // answered without taking the body: it is not read, and cannot be skipped
+		c.close = true
+		return s.finish(cs, g, headEnd)
+	}
+	cs.streaming, cs.bodyAt = true, headEnd
+	cs.bodyChunked, cs.bodyLeft = cs.req.ContentLength < 0, int64(cs.req.ContentLength)
+	cs.ck = chunkState{}
+	if want := headEnd + 32<<10; len(cs.rbuf) < want { // room to read the body in decent pieces
+		st, keep := s.sh(g), 4*s.cfg.MaxConns
+		nb := st.getBuf(want)
+		copy(nb, cs.rbuf[:cs.rlen])
+		st.putBuf(cs.rbuf, keep)
+		cs.rbuf = nb
+	}
+	return s.feedBody(cs, g)
+}
+
+// feedBody delivers the body bytes that have arrived to the handler's callback and
+// asks for more, until the body is complete or the handler stops the exchange.
+func (s *Server) feedBody(cs *connState, g *gina.Ctx) gina.Effect {
+	c := &cs.c
+	for {
+		s.pull(cs, g)
+		if cs.rlen == cs.bodyAt { // nothing new
+			if cs.tls != nil && cs.tls.PeerClosed() {
+				return s.closeConn(cs, g)
+			}
+			return s.recv(cs, g)
+		}
+		at := cs.bodyAt
+		var done bool
+		var stop bool
+		if cs.bodyChunked {
+			raw := cs.rbuf[at:cs.rlen]
+			i, w, fin, status := cs.ck.decode(raw, s.maxBody(cs), s.lim.maxHeaderBytes)
+			if status != 0 {
+				return s.failStream(cs, g, status)
+			}
+			if w > 0 || fin {
+				stop = c.DeliverBody(raw[:w], fin)
+			}
+			rest := len(raw) - i
+			copy(cs.rbuf[at:], cs.rbuf[at+w:at+w+rest])
+			cs.rlen, done = at+rest, fin
+		} else {
+			n := int(min(int64(cs.rlen-at), cs.bodyLeft))
+			cs.bodyLeft -= int64(n)
+			done = cs.bodyLeft == 0
+			stop = c.DeliverBody(cs.rbuf[at:at+n], done)
+			copy(cs.rbuf[at:], cs.rbuf[at+n:cs.rlen])
+			cs.rlen -= n
+		}
+		switch {
+		case stop:
+			cs.streaming, cs.ck = false, chunkState{}
+			c.close = true
+			return s.finish(cs, g, at) // the rest of the body is not read; the connection closes after the answer
+		case done:
+			cs.streaming, cs.ck = false, chunkState{}
+			return s.finish(cs, g, at)
+		}
+	}
+}
+
+// failStream answers a protocol error found in the middle of a streamed body.
+func (s *Server) failStream(cs *connState, g *gina.Ctx, code int) gina.Effect {
+	cs.streaming, cs.ck = false, chunkState{}
+	return s.fail(cs, g, code)
+}
+
+// ---- streamed response bodies ----
+
+const srcBuf = 32 << 10 // bytes read from a body source per piece
+
+// fillChunk reads the next piece of cs.src into cs.wbuf, after its first prefix
+// bytes (the response headers, for the first piece), framed as a chunk when the
+// length is unknown. It reports false when the stream cannot go on (the source
+// failed or ended early); cs.src is cleared, and closed, with the last piece.
+func (s *Server) fillChunk(cs *connState, g *gina.Ctx, prefix int) bool {
+	if cap(cs.wbuf) < prefix+srcBuf {
+		st, keep := s.sh(g), 4*s.cfg.MaxConns
+		nb := st.getBuf(prefix + srcBuf)[:prefix]
+		copy(nb, cs.wbuf[:prefix])
+		st.putBuf(cs.wbuf, keep)
+		cs.wbuf = nb
+	}
+	front, back := 0, 0
+	if cs.srcChunked {
+		front, back = 8, 7 // room for "xxxxx\r\n" before the data, "\r\n0\r\n\r\n" after
+	}
+	buf := cs.wbuf[:cap(cs.wbuf)]
+	room := len(buf) - prefix - front - back
+	if !cs.srcChunked && cs.srcLeft >= 0 && int64(room) > cs.srcLeft {
+		room = int(cs.srcLeft)
+	}
+	data := buf[prefix+front : prefix+front+room]
+	var n int
+	var err error
+	for tries := 0; n == 0 && err == nil && tries < 8; tries++ {
+		n, err = cs.src.Read(data)
+	}
+	if n == 0 && err == nil {
+		err = io.ErrNoProgress
+	}
+	end := err != nil // io.EOF, or a failure
+	if cs.srcLeft >= 0 {
+		cs.srcLeft -= int64(n)
+		if cs.srcLeft == 0 {
+			end, err = true, nil // all promised bytes are in hand: whatever else the reader holds is not sent
+		}
+	}
+	if err != nil && (err != io.EOF || cs.srcLeft > 0) {
+		return false // failed, or ended before the promised length
+	}
+	out := buf[:prefix+front+n]
+	if cs.srcChunked {
+		if n > 0 {
+			var hex [8]byte
+			h := strconv.AppendInt(hex[:0], int64(n), 16)
+			h = append(h, '\r', '\n')
+			start := prefix + front - len(h)
+			copy(buf[start:], h)
+			copy(buf[start-prefix:], buf[:prefix]) // slide the headers up against the chunk header
+			out = append(buf[start-prefix:prefix+front+n], "\r\n"...)
+		} else {
+			out = buf[:prefix] // no data: only the headers, if any
+		}
+		if end {
+			out = append(out, "0\r\n\r\n"...)
+		}
+	}
+	cs.wbuf = out
+	if end {
+		CloseSource(cs.src)
+		cs.src = nil
+	}
+	return true
 }
 
 // ---- tunnel mode ----

@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"gina/extensions/http2"
+	"github.com/rm4n0s/gina/extensions/http2"
 )
 
 const (

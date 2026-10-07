@@ -3,8 +3,8 @@ package http2
 import (
 	"time"
 
-	"gina"
-	ghttp "gina/extensions/http"
+	"github.com/rm4n0s/gina"
+	ghttp "github.com/rm4n0s/gina/extensions/http"
 )
 
 // Tunnels over HTTP/2: a stream opened by an extended CONNECT (RFC 8441) and

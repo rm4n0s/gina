@@ -1,10 +1,12 @@
 package http
 
 import (
+	"io"
+	"net/netip"
 	"strconv"
 
-	"gina"
-	gtls "gina/extensions/tls"
+	"github.com/rm4n0s/gina"
+	gtls "github.com/rm4n0s/gina/extensions/tls"
 )
 
 // Context is a request/response pair handed to a Handler. It is reused for every
@@ -12,24 +14,34 @@ import (
 type Context struct {
 	Req *Request
 
-	g       *gina.Ctx
-	params  [maxParams]param
-	nparams int
-	status  int
-	ctype   string
-	hdr     []byte // extra response headers, "Name: value\r\n" each
-	body    []byte
-	close   bool
-	stream  bool        // EventStream: keep the connection open for pushed events
-	notify  gina.Handle // EventStream: told when the stream ends
-	tls     *gtls.Conn
-	tunnel  Tunnel // SetTunnel: the protocol that takes the connection over
+	g         *gina.Ctx
+	params    [maxParams]param
+	nparams   int
+	status    int
+	ctype     string
+	hdr       []byte // extra response headers, "Name: value\r\n" each
+	body      []byte
+	close     bool
+	stream    bool        // EventStream: keep the connection open for pushed events
+	notify    gina.Handle // EventStream: told when the stream ends
+	tls       *gtls.Conn
+	fd        gina.FDHandle
+	tunnel    Tunnel    // SetTunnel: the protocol that takes the connection over
+	src       io.Reader // SendReader: the body, read as it is sent
+	srcSize   int64
+	onBody    BodyFunc // OnBody: takes the request body as it arrives
+	stopped   bool     // StopBody: answered early, the rest of the request is not wanted
+	bodyEnd   bool     // the last piece has been delivered
+	aborted   bool     // the body ended because the exchange did (AbortBody)
+	streaming bool     // the server is delivering the body itself (DispatchStream)
 }
 
 func (c *Context) reset(g *gina.Ctx, req *Request) {
 	c.Req, c.g, c.nparams, c.tls, c.tunnel = req, g, 0, nil, nil
 	c.status, c.ctype, c.close = 200, "", false
 	c.stream, c.notify = false, 0
+	c.onBody, c.stopped, c.bodyEnd, c.streaming, c.aborted = nil, false, false, false, false
+	c.dropSource() // a source the server never took (a handler that gave up) must not leak
 	c.hdr, c.body = c.hdr[:0], c.body[:0]
 }
 
@@ -58,6 +70,11 @@ func (c *Context) TLS() (TLSInfo, bool) {
 	}
 	return TLSInfo{ServerName: c.tls.ServerName(), ALPN: c.tls.ALPN(), CipherSuite: c.tls.CipherSuite()}, true
 }
+
+// RemoteAddr is the client's address (IPv4-mapped IPv6 is reported as IPv4). It
+// is the TCP peer: behind a proxy that is the proxy, so read X-Forwarded-For
+// yourself in that case. ok is false if the connection no longer exists.
+func (c *Context) RemoteAddr() (netip.AddrPort, bool) { return c.g.PeerAddr(c.fd) }
 
 // Gina exposes the isolate context, e.g. to message other isolates.
 func (c *Context) Gina() *gina.Ctx { return c.g }
@@ -203,6 +220,8 @@ func statusText(code int) string {
 		return "Accepted"
 	case 204:
 		return "No Content"
+	case 206:
+		return "Partial Content"
 	case 301:
 		return "Moved Permanently"
 	case 302:
@@ -237,6 +256,8 @@ func statusText(code int) string {
 		return "URI Too Long"
 	case 415:
 		return "Unsupported Media Type"
+	case 416:
+		return "Range Not Satisfiable"
 	case 422:
 		return "Unprocessable Content"
 	case 426:
@@ -260,3 +281,71 @@ func statusText(code int) string {
 }
 
 func bodyAllowed(code int) bool { return code >= 200 && code != 204 && code != 304 }
+
+// SendReader replies with a body that is read as it is sent, so a large response
+// is never held in memory: only one buffer (32 KiB) per streaming response. size is
+// the number of bytes r will deliver; the Content-Length of the reply is set
+// from it, and a reader that delivers fewer ends the connection. A negative size
+// means unknown: HTTP/1.1 sends the body chunked, HTTP/2 simply ends the stream
+// at io.EOF. If r is an io.Closer it is closed when the response is finished, or
+// abandoned (the peer went away, the connection or the server shut down).
+//
+// The server calls r.Read on the shard thread, between turns of other
+// connections, so a Read must not block for long: files in the page cache and
+// memory are fine, a slow network source is not (feed those from another
+// isolate instead). The handler may not touch r after SendReader returns.
+func (c *Context) SendReader(code int, contentType string, size int64, r io.Reader) {
+	c.dropSource()
+	c.status, c.ctype = code, contentType
+	c.body = c.body[:0]
+	if size == 0 { // nothing to read: an ordinary empty body
+		CloseSource(r)
+		return
+	}
+	c.src, c.srcSize = r, size
+}
+
+func (c *Context) dropSource() {
+	if c.src != nil {
+		CloseSource(c.src)
+		c.src = nil
+	}
+}
+
+// CloseSource closes r if it is an io.Closer (the servers use it for sources they
+// abandon).
+func CloseSource(r io.Reader) {
+	if cl, ok := r.(io.Closer); ok {
+		cl.Close()
+	}
+}
+
+// BodyFunc receives a request body in pieces (see Route.StreamBody). chunk is
+// valid only during the call; copy what you keep. last is true for the final call,
+// whose chunk may be empty. After the final call the response is whatever the
+// Context holds, as after an ordinary handler.
+type BodyFunc func(c *Context, chunk []byte, last bool)
+
+// OnBody registers fn to take the request body. On a route made with
+// Route.StreamBody the server calls it for every piece as it arrives, on the
+// shard thread: do not block in it (a write to a local file is fine, waiting for
+// another isolate is not; hand the piece to one with ctx.SendRaw instead). On other
+// routes the buffered body is delivered in one call once the handler returns.
+func (c *Context) OnBody(fn BodyFunc) { c.onBody = fn }
+
+// StopBody ends the exchange early with a plain-text answer: the rest of the body
+// is not wanted (too large, wrong content type, quota exceeded). HTTP/1.1 closes
+// the connection after the answer, since the unread body cannot be skipped
+// cheaply; HTTP/2 resets just that stream. Call it from the handler or from an
+// OnBody callback.
+func (c *Context) StopBody(code int, msg string) {
+	c.String(code, msg)
+	c.stopped = true
+	c.close = true
+}
+
+// BodyAborted reports, inside an OnBody callback, that the body will never be
+// complete: the client went away, timed out or reset the stream. The call it is
+// reported in is the last one (last is true, chunk empty), so a handler that
+// holds a file or a buffer can release it. No response can be sent anymore.
+func (c *Context) BodyAborted() bool { return c.aborted }

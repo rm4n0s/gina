@@ -20,11 +20,11 @@ import (
 	"testing"
 	"time"
 
-	"gina"
-	ghttp "gina/extensions/http"
-	"gina/extensions/http2"
-	gtls "gina/extensions/tls"
-	ws "gina/extensions/websocket"
+	"github.com/rm4n0s/gina"
+	ghttp "github.com/rm4n0s/gina/extensions/http"
+	"github.com/rm4n0s/gina/extensions/http2"
+	gtls "github.com/rm4n0s/gina/extensions/tls"
+	ws "github.com/rm4n0s/gina/extensions/websocket"
 )
 
 // ---- servers ----
@@ -36,9 +36,15 @@ const (
 	h1TLS
 	h2c
 	h2TLS
+	// an HTTP/2 server with HTTP1Fallback, spoken to over HTTP/1.1: the WebSocket
+	// runs inside the HTTP/1.1 connection that the h2 isolate adopted
+	dualH1
+	dualH1TLS
 )
 
-func (p proto) String() string { return [...]string{"ws/h1", "wss/h1", "ws/h2c", "wss/h2"}[p] }
+func (p proto) String() string {
+	return [...]string{"ws/h1", "wss/h1", "ws/h2c", "wss/h2", "ws/h1-on-h2-port", "wss/h1-on-h2-port"}[p]
+}
 
 var allProtos = []proto{h1, h1TLS, h2c, h2TLS}
 
@@ -88,7 +94,7 @@ func startServer(t *testing.T, p proto, wcfg ws.Config, o opts) *server {
 	port := freePort(t)
 	var tlsCfg *gtls.Config
 	var pool *x509.CertPool
-	if p == h1TLS || p == h2TLS {
+	if p == h1TLS || p == h2TLS || p == dualH1TLS {
 		cert, err := gtls.SelfSigned("localhost", "127.0.0.1")
 		if err != nil {
 			t.Fatal(err)
@@ -112,7 +118,7 @@ func startServer(t *testing.T, p proto, wcfg ws.Config, o opts) *server {
 		err = ghttp.New(cfg, r).Install(&spec)
 	default:
 		cfg := http2.Config{Addr: [4]byte{127, 0, 0, 1}, Port: port, ReusePort: o.shards > 1, MaxConns: 128, ConnMailbox: ws.MailboxCapacity,
-			ExtendedConnect: !o.noExtended, TLS: tlsCfg}
+			ExtendedConnect: !o.noExtended, TLS: tlsCfg, HTTP1Fallback: p == dualH1 || p == dualH1TLS}
 		if o.h2cfg != nil {
 			o.h2cfg(&cfg)
 		}
@@ -143,10 +149,13 @@ func (s *server) tcp() net.Conn {
 	s.t.Helper()
 	var c net.Conn
 	var err error
-	if s.proto == h1TLS || s.proto == h2TLS {
+	if s.proto == h1TLS || s.proto == h2TLS || s.proto == dualH1TLS {
 		cfg := &ctls.Config{RootCAs: s.pool, ServerName: "localhost"}
 		if s.proto == h2TLS {
 			cfg.NextProtos = []string{"h2"}
+		}
+		if s.proto == dualH1TLS {
+			cfg.NextProtos = []string{"http/1.1"}
 		}
 		c, err = ctls.Dial("tcp", s.addr(), cfg)
 	} else {

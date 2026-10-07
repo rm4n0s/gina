@@ -4,6 +4,7 @@ package gina
 
 import (
 	"errors"
+	"net/netip"
 	"syscall"
 	"time"
 )
@@ -30,6 +31,7 @@ func (r *reactor) active() int                               { return 0 }
 func (r *reactor) valid(FDHandle) bool                       { return false }
 func (r *reactor) listen(ListenSpec) (FDHandle, error)       { return 0, errNoIO }
 func (r *reactor) localPort(FDHandle) uint16                 { return 0 }
+func (r *reactor) peerAddr(FDHandle) (netip.AddrPort, bool)  { return netip.AddrPort{}, false }
 func (r *reactor) closeFD(FDHandle)                          {}
 func (r *reactor) submit(Handle, *isoType, uint32, *ioStage) {}
 func (r *reactor) cancelOp(int32)                            {}

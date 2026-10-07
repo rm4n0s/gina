@@ -1,7 +1,7 @@
 package http
 
 import (
-	"gina"
+	"github.com/rm4n0s/gina"
 )
 
 // Server-Sent Events. A handler calls Context.EventStream to turn its response

@@ -3,7 +3,7 @@ package gina
 import (
 	"fmt"
 
-	"gina/internal/prng"
+	"github.com/rm4n0s/gina/internal/prng"
 )
 
 // Ratio is an integer probability Num/Den (no floats, so results are identical
