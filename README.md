@@ -34,6 +34,7 @@ go run ./examples/shards -shards 4 -pin           # how to set up shards: a toke
 go run ./examples/sse -shards 2                   # Server-Sent Events: a clock isolate on its own shard pushes the time to open /events streams
 go run ./examples/http2 -port 8443 -tls -shards 4 # HTTP/2 over TLS 1.3 (drop -tls for cleartext h2c)
 go run ./examples/websocket -shards 2             # WebSocket chat: the room is an isolate on its own shard (-tls for wss, -h2 for HTTP/2)
+go run ./examples/wsworkers                      # two worker isolates and a browser: one pushes the time, the other prints "hello" when a button is pressed
 ```
 
 Simulation: `gina.NewSim(spec, seed, cfg)` runs the same engine cooperatively on one thread with a simulated clock, shuffled shard order, fault injection and invariant checks. The same seed always produces the same `Trace.Hash()`. (Threaded runs are not deterministic.)
