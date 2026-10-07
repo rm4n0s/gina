@@ -1,6 +1,6 @@
 # Gina
 
-A Go port of [pmbanugo/tina](https://github.com/pmbanugo/tina)'s concurrency model: **thread-per-core shards** (each a goroutine locked to an OS thread, optionally pinned to a core) that own their isolates, memory pool, timers and sockets, and exchange 128-byte messages through **lock-free SPSC rings**. Goroutines and channels are confined to one file (the thread host) and the tests that opt in; everything else is single-threaded per shard. See [SPEC.md](SPEC.md) (the "Implementation status" section lists what exists and what does not).
+A Go port of [pmbanugo/tina](https://github.com/pmbanugo/tina)'s concurrency model: **thread-per-core shards** (each a goroutine locked to an OS thread, optionally pinned to a core) that own their isolates, memory pool, timers and sockets, and exchange 128-byte messages through **lock-free SPSC rings**. Goroutines and channels are confined to one file (the thread host), the tests that opt in, and `extensions/webpush/transport.go` (see Web Push); everything else is single-threaded per shard. See [SPEC.md](SPEC.md) (the "Implementation status" section lists what exists and what does not).
 
 **Why this model?** Two articles by Peter Mbanugo (Tina's author) explains the reasoning:
 
@@ -35,6 +35,7 @@ go run ./examples/sse -shards 2                   # Server-Sent Events: a clock 
 go run ./examples/http2 -port 8443 -tls -shards 4 # HTTP/2 over TLS 1.3 (drop -tls for cleartext h2c)
 go run ./examples/websocket -shards 2             # WebSocket chat: the room is an isolate on its own shard (-tls for wss, -h2 for HTTP/2)
 go run ./examples/wsworkers                      # two worker isolates and a browser: one pushes the time, the other prints "hello" when a button is pressed
+go run ./examples/webpush                       # Web Push: a browser subscribes and the server sends it notifications (http://localhost:8080)
 ```
 
 Simulation: `gina.NewSim(spec, seed, cfg)` runs the same engine cooperatively on one thread with a simulated clock, shuffled shard order, fault injection and invariant checks. The same seed always produces the same `Trace.Hash()`. (Threaded runs are not deterministic.)
@@ -141,3 +142,29 @@ srv := ghttp.New(ghttp.Config{Port: 8443, TLS: tlsCfg, ConnMailbox: websocket.Ma
 - **What it checks.** Strict frame validation (masking, reserved bits, opcodes, control-frame limits), UTF-8 of text messages and close reasons *incrementally* (a bad byte is refused as it arrives), message size (`MaxMessageSize`, default 1 MiB) and queued-output limits, a keep-alive ping with a pong deadline, a closing-handshake timeout, a same-origin `CheckOrigin` by default (cross-site hijacking by browsers), and a panic in a callback closes that one connection with 1011.
 - **Not implemented:** extensions (permessage-deflate is not negotiated; clients that offer it are answered without it) and sending fragmented messages.
 - **Verified** with a frame-parser suite (random split points, every protocol error) and integration tests that run each scenario over ws, wss, h2c and h2 over TLS, under `-race`; by hand against `gorilla/websocket`, `coder/websocket`, `golang.org/x/net/http2`'s extended-CONNECT client and `aiohttp` (see [SPEC.md](SPEC.md#verification-and-what-is-not-verified)). It has **not** been run through the Autobahn suite, tried in a browser, or security-audited.
+
+## Web Push
+
+`extensions/webpush` sends [Web Push](https://www.rfc-editor.org/rfc/rfc8030) messages: the notifications a browser shows from its service worker even when your page is closed. The browser subscribes through its vendor's push service (FCM, Mozilla, Apple) and gives the page an endpoint URL and two keys; the page sends those to you; to notify, the server encrypts the message for that subscription ([RFC 8291](https://www.rfc-editor.org/rfc/rfc8291)), signs a VAPID token that identifies it ([RFC 8292](https://www.rfc-editor.org/rfc/rfc8292)) and POSTs both to the endpoint.
+
+```go
+vapid, _ := webpush.GenerateVAPID()   // once: keep vapid.PrivateKey(), give pages vapid.PublicKey()
+wp, _ := webpush.New(webpush.Config{VAPID: vapid, Subject: "mailto:ops@example.com", Shard: 2})
+wp.Install(&spec)                     // adds the sender isolate to shard 2
+sys, _ := gina.NewSystem(spec, gina.Options{})
+wp.Start(sys)                         // starts the workers that talk to push services
+
+// in any isolate, on any shard:
+sub, _ := webpush.ParseSubscription(jsonFromTheBrowser)
+wp.Send(ctx, &webpush.Notification{ID: 7, Sub: sub, Payload: []byte(`{"title":"Hi"}`)})
+// later the isolate that sent it gets TagResult: gina.PayloadAs[webpush.Result](m)
+// Outcome Delivered, Gone (404/410: delete the subscription), Rejected, Failed, ...
+```
+
+- **How it fits.** `Send` is a message to a *sender isolate*, which hands the notification to a small pool of worker goroutines without blocking. A worker encrypts, signs and POSTs it, then reports the outcome back with `System.SendExternal` as a `TagResult` to the isolate that sent it (or `Notification.ReplyTo`). The pool exists because Gina's TLS is server-only and its reactor cannot connect out, so the request to the push service uses `net/http`. That is confined to `extensions/webpush/transport.go`; everything else is plain isolate code.
+- **Safe by default.** A subscriber chooses the endpoint, so the sender only connects to `https` endpoints and its dialer refuses loopback, private, link-local and carrier-grade-NAT addresses after name resolution (SSRF). It does not follow redirects. `Config.AllowInsecure` and `AllowPrivate` relax this for development.
+- **Behaviour.** VAPID tokens are cached per push service (one signature about every 11 hours). 429, 5xx and network errors are retried (`Config.Retries`, default 2, with backoff and `Retry-After`); 404/410 report `OutcomeGone`; other 4xx report `OutcomeRejected` without retrying. Payloads up to 3993 bytes, optional padding, `TTL`, `Urgency` and `Topic`.
+- **Not implemented:** push receipts, the legacy `aesgcm` coding and GCM API keys (every current browser takes `aes128gcm` with VAPID). Delivery is best effort and at most once: a full queue, mailbox or ring drops a notification (a full queue says so in the `Result`), and work still queued when the system stops is discarded. `OutcomeDelivered` means the push service accepted the message, not that the browser showed it.
+- **Verified** against the worked example of RFC 8291 Appendix A (byte-exact), an RFC 8292 sample token, a round-trip decrypt, and integration tests on a threaded system under `-race` against a fake push service that decrypts what it receives and checks the VAPID token (outcomes, retries, queue overflow, shutdown with a request in flight, SSRF and redirect refusal); and by running `examples/webpush` as a server against such a fake push service. **No real browser and no real push service (FCM, Mozilla, Apple) has been run against it.**
+
+`go run ./examples/webpush` serves a page with an "Enable notifications" button, the service worker and the subscribe/notify endpoints. Service workers need `localhost` or HTTPS with a certificate the browser trusts.
