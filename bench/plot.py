@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Render bench/results.csv as bench/results.svg + results.png (and a dark variant).
 
-    python3 bench/plot.py            # needs rsvg-convert for the PNGs
+    python3 bench/plot.py            # HTTP/1.1; needs rsvg-convert for the PNGs
+    python3 bench/plot.py h2         # HTTP/2: bench/results-h2.csv -> results-h2{,-dark}.{svg,png}
 
 Colors follow the validated reference palette (categorical slots, light and dark steps).
 Color follows the entity: Gina is always blue, net/http orange; shapes (circle / diamond)
@@ -28,7 +29,8 @@ SERVERS = {
 }
 ORDER = ["nethttp", "gina"]  # draw order: the headline series ends up on top
 
-rows = list(csv.DictReader(open(os.path.join(HERE, "results.csv"))))
+H2 = len(sys.argv) > 1 and sys.argv[1] == "h2"
+rows = list(csv.DictReader(open(os.path.join(HERE, "results-h2.csv" if H2 else "results.csv"))))
 g = defaultdict(list)
 for r in rows:
     g[(r["scenario"], r["tls"], int(r["cores"]), r["server"])].append(r)
@@ -146,7 +148,61 @@ def legend(x_right, y):
     return "\n".join(out)
 
 
+def build_h2():
+    ka_http, ka_tls = series("get", "plain", "rps", 1e-3), series("get", "tls", "rps", 1e-3)
+    p99_http, p99_tls = series("get", "plain", "p99_ms"), series("get", "tls", "p99_ms")
+    echo = {s: [med("echo64k", t, 4, s, "rps") * 1e-3 for t in ("plain", "tls")] for s in SERVERS}
+    mem = {s: [med("get", t, 8, s, "rss_mb") for t in ("plain", "tls")] for s in SERVERS}
+    er = [a / b for a, b in zip(echo["gina"], echo["nethttp"])]
+    mt = [a / b for a, b in zip(mem["gina"], mem["nethttp"])]
+    thr = lambda t: f"{t:,.0f}"
+
+    panels = [
+        line_panel(0, f"Keep-alive GET, h2c: {span(ka_http['gina'], ka_http['nethttp'])} throughput",
+                   "Requests per second (thousands) · higher is better", ka_http, 2000, [0, 500, 1000, 1500, 2000],
+                   thr, lambda v: fk(v)),
+        line_panel(0, f"Keep-alive GET, h2 over TLS: {span(ka_tls['gina'], ka_tls['nethttp'])} throughput",
+                   "Requests per second (thousands) · higher is better", ka_tls, 2000, [0, 500, 1000, 1500, 2000],
+                   thr, lambda v: fk(v)),
+        bar_panel(0, f"64 KiB echo, 4 cores: {er[0]:.1f}× h2c, {er[1]:.1f}× TLS",
+                  "POST /echo, requests per second (thousands) · higher is better", ["h2c", "h2 over TLS 1.3"], echo,
+                  200, [0, 50, 100, 150, 200], thr, lambda v: fk(v),
+                  [f"Gina {er[0]:.1f}× net/http", f"Gina {er[1]:.1f}× net/http"]),
+        line_panel(0, f"p99 latency, h2c: {span(p99_http['gina'], p99_http['nethttp'], invert=True)} lower",
+                   "Keep-alive GET, milliseconds · lower is better", p99_http, 8, [0, 2, 4, 6, 8],
+                   thr, lambda v: f"{v:.2f} ms"),
+        line_panel(0, f"p99 latency, TLS: {span(p99_tls['gina'], p99_tls['nethttp'], invert=True)} lower",
+                   "Keep-alive GET, milliseconds · lower is better", p99_tls, 8, [0, 2, 4, 6, 8],
+                   thr, lambda v: f"{v:.2f} ms"),
+        bar_panel(0, f"Memory at 8 cores: {min(mt):.1f}–{max(mt):.1f}× net/http",
+                  "Resident memory of the server process (MB) · lower is better", ["h2c", "h2 over TLS 1.3"], mem,
+                  80, [0, 20, 40, 60, 80], thr, lambda v: f"{v:,.0f}",
+                  [f"Gina {mt[0]:.1f}× net/http", f"Gina {mt[1]:.1f}× net/http"]),
+    ]
+    body = []
+    for i, p in enumerate(panels):
+        col, row = i % 3, i // 3
+        x, y = M + col * (PW + GUT), HEAD + row * (PH + 36)
+        body.append(f'<g transform="translate({x:.1f},{y:.1f})">\n{p}\n</g>')
+
+    head = [
+        text(M, 62, "Gina vs Go net/http, HTTP/2", 34, "ink", 700),
+        text(M, 94, "HTTP/2 only on both sides. Same cores, same routes, same bodies. Loopback, 64 connections x 4 streams, median of two 4 s runs per point.", 15, "ink2"),
+        text(M, 116, "Server pinned to N physical cores; the oha load generator runs on separate cores. Gina: one process, N pinned shard threads (Tina's model).", 15, "ink2"),
+        legend(W - M, 62),
+    ]
+    fy = H - 76
+    foot = [
+        text(M, fy, "Gina's 4- and 8-core points are probably limited by the load generator (4 to 8 cores adds only 6%), so those ratios are lower bounds.", 13, "ink2"),
+        text(M, fy + 20, "Not a feature-equal comparison: net/http is a complete, hardened server; Gina's HTTP/2 has no push, priorities or trailers, and its TLS 1.3 is unaudited.", 13, "ink2"),
+        text(M, fy + 40, "Shard threads share one Go heap and GC. One machine (AMD Ryzen AI MAX+ 395), Go 1.26, oha 1.16, 2026-10-07. Tables and caveats: docs/BENCHMARKS.md.", 13, "ink2"),
+    ]
+    return "\n".join(head + body + foot)
+
+
 def build():
+    if H2:
+        return build_h2()
     ka_http, ka_tls = series("get", "plain", "rps", 1e-3), series("get", "tls", "rps", 1e-3)
     hs = series("newconn", "tls", "rps", 1e-3)
     p99 = series("get", "plain", "p99_ms")
@@ -202,14 +258,20 @@ def build():
 def render(theme):
     t = THEMES[theme]
     inner = build().format(**t)
+    desc = (("Six small charts comparing Gina (shard threads in one process) with Go net/http serving HTTP/2 on 1 to 8 cores: "
+             "keep-alive throughput over h2c and h2 over TLS, a 64 KiB echo test, p99 latency over both, and memory use. "
+             "Gina is faster on every throughput and latency measure; its 4- and 8-core points are probably limited by the load generator. "
+             "Gina uses more memory than net/http at 8 cores. The same numbers are tabulated in docs/BENCHMARKS.md.") if H2 else
+            ("Six small charts comparing Gina (shard threads in one process) with Go net/http on 1 to 8 cores: "
+             "keep-alive throughput over HTTP and HTTPS, TLS handshakes per second, p99 latency, a 64 KiB echo test and memory use. "
+             "Gina is faster on every throughput and latency measure; Gina uses about the same memory as net/http on HTTP and about three times as much on HTTPS. The same numbers are tabulated in docs/BENCHMARKS.md."))
+    title = "Gina vs Go net/http HTTP/2 benchmark results" if H2 else "Gina vs Go net/http benchmark results"
     svg = (f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" '
            f'font-family="{FONT}" role="img" aria-labelledby="t d">\n'
-           f'<title id="t">Gina vs Go net/http benchmark results</title>\n'
-           f'<desc id="d">Six small charts comparing Gina (shard threads in one process) with Go net/http on 1 to 8 cores: '
-           f'keep-alive throughput over HTTP and HTTPS, TLS handshakes per second, p99 latency, a 64 KiB echo test and memory use. '
-           f'Gina is faster on every throughput and latency measure; Gina uses about the same memory as net/http on HTTP and about three times as much on HTTPS. The same numbers are tabulated in docs/BENCHMARKS.md.</desc>\n'
+           f'<title id="t">{title}</title>\n'
+           f'<desc id="d">{desc}</desc>\n'
            f'<rect width="{W}" height="{H}" fill="{t["surface"]}"/>\n{inner}\n</svg>\n')
-    suffix = "" if theme == "light" else "-dark"
+    suffix = ("-h2" if H2 else "") + ("" if theme == "light" else "-dark")
     svg_path, png_path = (os.path.join(HERE, f"results{suffix}.{e}") for e in ("svg", "png"))
     open(svg_path, "w").write(svg)
     try:

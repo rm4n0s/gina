@@ -30,6 +30,12 @@ type Config struct {
 	WriteTimeout       time.Duration // default 10s
 	MaxRequestsPerConn int           // 0 = unlimited
 
+	// ConnMailbox is the mailbox capacity of a connection isolate (default 4). A
+	// connection only gets mail when it streams (SSE) or carries a tunnel
+	// (WebSocket): raise it so a burst of pushes between two of its turns is not
+	// dropped, and give the System enough PoolSlots to hold the queued messages.
+	ConnMailbox int
+
 	// TLS, when set, serves HTTPS: every connection runs a TLS 1.3 handshake first
 	// (see gina/extensions/tls for what is and is not supported).
 	TLS *gtls.Config
@@ -54,6 +60,7 @@ func (c *Config) defaults() {
 	def(&c.MaxHeaderBytes, 16384)
 	def(&c.MaxURIBytes, 8192)
 	def(&c.MaxBodyBytes, 1<<20)
+	def(&c.ConnMailbox, 4)
 	defd(&c.IdleTimeout, 60*time.Second)
 	defd(&c.ReadTimeout, 10*time.Second)
 	defd(&c.WriteTimeout, 10*time.Second)
@@ -150,9 +157,9 @@ func (s *Server) Install(spec *gina.SystemSpec) error {
 	lid, cid := s.cfg.TypeIDBase, s.cfg.TypeIDBase+1
 	spec.Types = append(spec.Types,
 		gina.RegisterType(lid, gina.TypeOptions{SlotCount: 2, MailboxCapacity: 4}, s.listenerInit, s.listenerHandler),
-		gina.RegisterType(cid, gina.TypeOptions{SlotCount: s.cfg.MaxConns, MailboxCapacity: 4, ChunkSize: 64}, s.connInit, s.connHandler),
+		gina.RegisterType(cid, gina.TypeOptions{SlotCount: s.cfg.MaxConns, MailboxCapacity: s.cfg.ConnMailbox, ChunkSize: 64}, s.connInit, s.connHandler),
 	)
-	spec.PoolSlots = max(spec.PoolSlots, 8*s.cfg.MaxConns, 4096)
+	spec.PoolSlots = max(spec.PoolSlots, 8*s.cfg.MaxConns, s.cfg.MaxConns*s.cfg.ConnMailbox/2, 4096)
 	spec.TimerEntries = max(spec.TimerEntries, s.cfg.MaxConns+64)
 	spec.MaxFDs = max(spec.MaxFDs, s.cfg.MaxConns+16)
 	for i := range spec.Shards {
@@ -220,21 +227,26 @@ func (s *Server) listenerHandler(l *listener, g *gina.Ctx, m *gina.Message) gina
 // ---- connection isolate ----
 
 type connState struct {
-	fd         gina.FDHandle
-	rbuf, wbuf []byte // plaintext: request bytes / response
-	cbuf       []byte // TLS only: ciphertext read buffer
-	tls        *gtls.Conn
-	tlsSent    int // TLS only: bytes of tls.Outgoing() in the send that is in flight
-	rlen       int
-	scanned    int
-	reqStart   uint64 // ns when the current request's first byte arrived; 0 when idle
-	requests   int
-	closeAfter bool
-	stream     bool        // SSE: the connection only pushes events, it no longer reads requests
-	notify     gina.Handle // SSE: told (TagStreamClosed) when the stream ends
-	req        Request
-	hdrs       [64]Header
-	c          Context
+	fd          gina.FDHandle
+	rbuf, wbuf  []byte // plaintext: request bytes / response
+	cbuf        []byte // TLS only: ciphertext read buffer
+	tls         *gtls.Conn
+	tlsSent     int // TLS only: bytes of tls.Outgoing() in the send that is in flight
+	rlen        int
+	scanned     int
+	reqStart    uint64 // ns when the current request's first byte arrived; 0 when idle
+	requests    int
+	closeAfter  bool
+	stream      bool        // SSE: the connection only pushes events, it no longer reads requests
+	notify      gina.Handle // SSE: told (TagStreamClosed) when the stream ends
+	tun         Tunnel      // upgraded: the connection belongs to this protocol
+	tunOpen     bool        // tun.Open has been called (Closed is owed)
+	tunShut     bool        // tun.Shutdown has been called
+	tunNotified bool        // TLS close_notify queued
+	tunSent     int         // plaintext tunnel only: bytes of tun.Outgoing() in the send that is in flight
+	req         Request
+	hdrs        [64]Header
+	c           Context
 }
 
 func (st *shardState) getBuf(n int) []byte {
@@ -272,6 +284,11 @@ func (s *Server) connInit(cs *connState, g *gina.Ctx, _ []byte) gina.Effect {
 }
 
 func (s *Server) closeConn(cs *connState, g *gina.Ctx) gina.Effect {
+	if cs.tun != nil && cs.tunOpen {
+		cs.tunOpen = false
+		cs.tun.Closed(g)
+	}
+	cs.tun = nil
 	if cs.stream && cs.notify != 0 {
 		self := g.Self()
 		gina.Send(g, cs.notify, TagStreamClosed, &self)
@@ -322,6 +339,9 @@ func (s *Server) connHandler(cs *connState, g *gina.Ctx, m *gina.Message) gina.E
 	switch m.Tag {
 	case gina.TagIORecv:
 		n := gina.PayloadAs[gina.IOResult](m).Result
+		if cs.tun != nil {
+			return s.tunRecv(cs, g, n)
+		}
 		if n == -int64(syscall.ETIMEDOUT) && cs.rlen > 0 {
 			return s.fail(cs, g, 408)
 		}
@@ -350,9 +370,15 @@ func (s *Server) connHandler(cs *connState, g *gina.Ctx, m *gina.Message) gina.E
 		if cs.tls != nil {
 			cs.tls.ConsumeOut(cs.tlsSent)
 			cs.tlsSent = 0
-			if cs.tls.OutLen() > 0 {
+			if cs.tls.OutLen() > 0 && cs.tun == nil {
 				return s.flush(cs, g)
 			}
+		} else if cs.tunSent > 0 {
+			cs.tun.Sent(cs.tunSent)
+			cs.tunSent = 0
+		}
+		if cs.tun != nil {
+			return s.tunFlush(cs, g)
 		}
 		if cs.closeAfter || g.IsShuttingDown() {
 			return s.closeConn(cs, g)
@@ -367,8 +393,29 @@ func (s *Server) connHandler(cs *connState, g *gina.Ctx, m *gina.Message) gina.E
 		}
 		cs.wbuf = appendEvent(cs.wbuf[:0], m.Payload[:m.PayloadSize])
 		return s.sendResponse(cs, g)
+	case TagTunnel:
+		if cs.tun == nil {
+			return gina.WaitMessage() // not (or no longer) a tunnel: nobody to give it to
+		}
+		if cs.tunOpen && !cs.closeAfter && m.PayloadSize >= 4 {
+			cs.tun.Push(g, m.Payload[4:m.PayloadSize])
+		}
+		return gina.Yield() // more mail may be queued: take it all before writing
+	case gina.TagYield:
+		if cs.tun != nil {
+			return s.tunFlush(cs, g)
+		}
+		return gina.WaitMessage()
 	case gina.TagShutdown:
+		if cs.tun != nil && cs.tunOpen && !cs.tunShut {
+			cs.tunShut, cs.closeAfter = true, true
+			cs.tun.Shutdown(g)
+			return s.tunFlush(cs, g)
+		}
 		return s.closeConn(cs, g)
+	}
+	if cs.tun != nil {
+		return s.tunFlush(cs, g)
 	}
 	return gina.WaitIO()
 }
@@ -443,6 +490,10 @@ func (s *Server) process(cs *connState, g *gina.Ctx) gina.Effect {
 	if c.stream {
 		cs.stream, cs.notify, cs.closeAfter = true, c.notify, g.IsShuttingDown()
 	}
+	if c.tunnel != nil && c.status == 101 { // protocol switch: the connection now belongs to the tunnel
+		cs.tun, cs.closeAfter = c.tunnel, g.IsShuttingDown()
+	}
+	c.tunnel = nil
 	s.buildResponse(cs, cs.req.Method == "HEAD", ss)
 	copy(cs.rbuf, cs.rbuf[consumed:cs.rlen]) // keep pipelined bytes, after the response is built
 	cs.rlen -= consumed
@@ -477,16 +528,7 @@ func grow(b []byte, n int) []byte {
 
 // dispatch runs the router; a panicking handler becomes a 500 and the
 // connection survives (closed after the response).
-func (s *Server) dispatch(c *Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			c.status, c.ctype, c.close = 500, "text/plain; charset=utf-8", true
-			c.hdr = c.hdr[:0]
-			c.body = append(c.body[:0], "internal server error\n"...)
-		}
-	}()
-	s.router.serve(c)
-}
+func (s *Server) dispatch(c *Context) { s.router.Dispatch(c) }
 
 // fail answers a protocol error and closes the connection.
 func (s *Server) fail(cs *connState, g *gina.Ctx, code int) gina.Effect {
@@ -549,4 +591,101 @@ func (s *Server) buildResponse(cs *connState, head bool, st *shardState) {
 		w = append(w, c.body...)
 	}
 	cs.wbuf = w
+}
+
+// ---- tunnel mode ----
+//
+// After a 101 the connection is a byte stream between the peer and cs.tun. It
+// still works half duplex, one operation in flight: write what the tunnel has
+// queued, else read, and a read parks with WaitIOOrMessage so that messages from
+// other isolates (TagTunnel) interrupt it.
+
+// tunRecv handles the completion of a tunnel read.
+func (s *Server) tunRecv(cs *connState, g *gina.Ctx, n int64) gina.Effect {
+	switch {
+	case n == -int64(syscall.ECANCELED): // interrupted by mail, or shutdown: look at the mailbox
+		return gina.Yield()
+	case n == -int64(syscall.ETIMEDOUT):
+		cs.tun.Tick(g)
+		return s.tunFlush(cs, g)
+	case n <= 0:
+		return s.closeConn(cs, g)
+	}
+	if cs.tls != nil {
+		if err := cs.tls.Feed(cs.cbuf[:n]); err != nil {
+			return s.closeConn(cs, g) // the alert, if any, is not worth a write: the tunnel is gone
+		}
+	} else {
+		cs.rlen = int(n)
+	}
+	return s.tunStep(cs, g)
+}
+
+// tunStep feeds buffered plaintext to the tunnel, then writes or reads.
+func (s *Server) tunStep(cs *connState, g *gina.Ctx) gina.Effect {
+	if !cs.tunOpen {
+		return s.tunFlush(cs, g)
+	}
+	for {
+		s.pull(cs, g)
+		if cs.rlen == 0 {
+			break
+		}
+		n := cs.rlen
+		cs.rlen = 0
+		cs.tun.Receive(g, cs.rbuf[:n])
+	}
+	if cs.tls != nil && cs.tls.PeerClosed() {
+		return s.closeConn(cs, g)
+	}
+	return s.tunFlush(cs, g)
+}
+
+// tunFlush writes what is queued (the tunnel's output, and any TLS records), and
+// when nothing is left either closes, or waits for the peer or for mail.
+func (s *Server) tunFlush(cs *connState, g *gina.Ctx) gina.Effect {
+	t := cs.tun
+	if cs.tls != nil {
+		if out := t.Outgoing(); len(out) > 0 && cs.tunOpen {
+			if cs.tls.Write(out) != nil {
+				return s.closeConn(cs, g)
+			}
+			t.Sent(len(out))
+		}
+		if wire := cs.tls.Outgoing(); len(wire) > 0 {
+			cs.tlsSent = len(wire)
+			g.IOSend(cs.fd, wire, timeoutOr0(s.cfg.WriteTimeout))
+			return gina.WaitIO()
+		}
+	} else if out := t.Outgoing(); len(out) > 0 && cs.tunOpen {
+		cs.tunSent = len(out)
+		g.IOSend(cs.fd, out, timeoutOr0(s.cfg.WriteTimeout))
+		return gina.WaitIO()
+	}
+	if !cs.tunOpen { // the 101 has gone out: start the tunnel, then deal with what it queued and what the peer already sent
+		cs.tunOpen = true
+		t.Open(g, 0)
+		return s.tunStep(cs, g)
+	}
+	if t.Done() || cs.closeAfter || g.IsShuttingDown() {
+		if cs.tls != nil && !cs.tunNotified {
+			cs.tunNotified = true
+			cs.tls.CloseNotify()
+			if cs.tls.OutLen() > 0 {
+				return s.tunFlush(cs, g)
+			}
+		}
+		return s.closeConn(cs, g)
+	}
+	d, ok := t.Idle(g.Now())
+	var timeout time.Duration
+	if ok {
+		timeout = max(d, time.Millisecond)
+	}
+	if cs.tls != nil {
+		g.IORecv(cs.fd, cs.cbuf, timeout)
+	} else {
+		g.IORecv(cs.fd, cs.rbuf, timeout)
+	}
+	return gina.WaitIOOrMessage()
 }

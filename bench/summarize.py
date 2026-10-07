@@ -5,6 +5,8 @@ Servers: gina = Gina, N shard threads in ONE process; nethttp = Go net/http.
 """
 import csv, statistics, sys, collections
 
+# usage: summarize.py [results.csv [protocol label, e.g. HTTP/2]]
+proto = sys.argv[2] if len(sys.argv) > 2 else None
 rows = list(csv.DictReader(open(sys.argv[1] if len(sys.argv) > 1 else "bench/results.csv")))
 groups = collections.defaultdict(list)
 for r in rows:
@@ -21,7 +23,7 @@ for scenario in ("get", "newconn", "echo64k"):
         cores = sorted({k[2] for k in groups if k[0] == scenario and k[1] == tls})
         if not cores:
             continue
-        print(f"\n#### {titles[scenario]} - {'HTTPS (TLS 1.3)' if tls == 'tls' else 'HTTP'}\n")
+        print(f"\n#### {titles[scenario]} - {(proto + ' over TLS 1.3' if proto else 'HTTPS (TLS 1.3)') if tls == 'tls' else (proto + ' (h2c)' if proto else 'HTTP')}\n")
         print("| cores | Gina req/s | net/http req/s | Gina / net/http | p99 ms (Gina / net/http) | RSS MB (Gina / net/http) |")
         print("|---:|---:|---:|---:|---|---|")
         for c in cores:

@@ -12,7 +12,7 @@ Upstream is Apache-2.0. Reimplementing from documented behaviour is fine. Copyin
 
 ## Implementation status (2026-10-07)
 
-Gina is a working Tina-style runtime in Go, plus an HTTP/1.1 + TLS 1.3 server built on it. It is about 6,300 lines of Go (examples and the benchmark baseline included) plus 2,900 lines of tests: **73 passing tests, 5 benchmarks**. Concurrency is confined to the thread host by convention.
+Gina is a working Tina-style runtime in Go, plus HTTP/1.1 and HTTP/2 servers, a TLS 1.3 server and a WebSocket server built on it. It is about 10,400 lines of Go (examples and the benchmark baseline included) plus 6,300 lines of tests: **143 passing top-level tests, 5 benchmarks** (more with subtests). Concurrency is confined to the thread host by convention.
 
 **Architecture as built: thread per core, like Tina.** Each shard is a goroutine locked to its own OS thread (optionally pinned to a core) that owns its isolates, message pool, timers and sockets. Shards exchange 128-byte messages through lock-free SPSC rings in the shared address space (atomic cursors, one publish per tick, one commit per drain). An idle shard spins briefly, then sleeps in its own `epoll`; a peer that publishes into one of its rings wakes it through an `eventfd`. Goroutines and other concurrency primitives are **confined by convention to one file** (`threads.go`, the thread host) and the tests; the rest of the engine is single-threaded per shard (§2). A single-thread cooperative driver (`System.Step`) remains for the deterministic simulator and unit tests.
 
@@ -20,14 +20,16 @@ Linux is the only platform with I/O (other platforms build, without sockets).
 
 ### What exists
 
-- **Engine** (package `gina`): isolates returning effects (`Done`, `Yield`, `WaitMessage`, `WaitIO`, `Crash`); typed chunked slab storage with generational 28-bit handles; the fixed 128-byte `Message` (size asserted at compile time) with pointer-free, padding-free payload validation (cached lock-free); bounded mailboxes; a message pool with a protected system reserve; indexed timer heap with cancel; spawn with args; same-shard attachments (`SendAttach`); ordered shutdown; structural invariant checks.
+- **Engine** (package `gina`): isolates returning effects (`Done`, `Yield`, `WaitMessage`, `WaitIO`, `WaitIOOrMessage`, `Crash`); typed chunked slab storage with generational 28-bit handles; the fixed 128-byte `Message` (size asserted at compile time) with pointer-free, padding-free payload validation (cached lock-free); bounded mailboxes; a message pool with a protected system reserve; indexed timer heap with cancel; spawn with args; same-shard attachments (`SendAttach`); ordered shutdown; structural invariant checks.
 - **Threaded runtime** (`System.Start/Run/Wait/Stop`, `Ctx.StopSystem`, `RunOptions{Pin, CPUBase, ShutdownGrace, SpinFor}`): one locked thread per shard; N×(N-1) Tina-style SPSC rings (producer and consumer cursors on separate cache-line pairs with cached copies of each other's cursor); wake-up protocol (announce sleep, re-check rings, block; senders publish, then check the flag) with sequentially consistent atomics; per-shard `epoll` + `eventfd`; idle spin before sleeping; graceful stop (`TagShutdown`, then force-free after the grace period); per-goroutine `SetPanicOnFault` so faults in handlers stay contained.
 - **Supervision:** one-for-one, one-for-all, rest-for-one; permanent/transient/temporary; sliding restart budget; `TagChildExit` to the spawning isolate; Level-2 shard reset; quarantine and revive; a trap boundary (`recover` + `SetPanicOnFault`) that turns a handler panic or fault into a crash of that isolate only.
 - **Simulator** (cooperative driver): seeded PRNG tree (SplitMix64 + xoshiro256**, known-answer tested), simulated clock, shuffled shard order, fault injection (message drop, handler crash, partitions), per-round invariant checks, FNV trace hash. Same seed gives the same hash (tested across 30 seeds with faults). Threaded runs are *not* deterministic.
-- **I/O:** edge-triggered epoll reactor presented with completion semantics (`ctx.Listen` with optional `SO_REUSEPORT`, `IOAccept`/`IORecv`/`IOSend` + `WaitIO()`, per-operation timeouts, cancellation when an isolate dies or shutdown starts, sockets owned by isolates and closed when the owner dies). One reactor (epoll instance) per shard.
-- **`extensions/http`:** HTTP/1.1 server on isolates (listener per shard, isolate per connection): allocation-free strict parser, router, response context, idle/read/write timeouts, connection shedding, graceful shutdown, `Context.TLS()`, Server-Sent Events (`Context.EventStream`, `SendEvent`: any isolate on any shard pushes to an open stream). Server state is **per shard** (counters, buffer pool, date cache) so shard threads never share it.
+- **I/O:** edge-triggered epoll reactor presented with completion semantics (`ctx.Listen` with optional `SO_REUSEPORT`, `IOAccept`/`IORecv`/`IOSend` + `WaitIO()`, per-operation timeouts, cancellation when an isolate dies or shutdown starts, sockets owned by isolates and closed when the owner dies). One reactor (epoll instance) per shard. **`WaitIOOrMessage`** (added for WebSocket) parks an isolate on a read that a message may interrupt: the read completes with `-ECANCELED` ahead of the mail, and a read staged while mail is already queued is interrupted at once. Reads only: cancelling a write would leave a partial send. Nothing changes for isolates that use `WaitIO`.
+- **`extensions/http`:** HTTP/1.1 server on isolates (listener per shard, isolate per connection): allocation-free strict parser, router, response context, idle/read/write timeouts, connection shedding, graceful shutdown, `Context.TLS()`, Server-Sent Events (`Context.EventStream`, `SendEvent`: any isolate on any shard pushes to an open stream), and **tunnels**: a handler that answers 101 may hand the connection to an `http.Tunnel` (`Context.SetTunnel`), which the connection isolate then drives (bytes in, bytes out, a timer, pushes from other isolates through `SendTunnel`). Server state is **per shard** (counters, buffer pool, date cache) so shard threads never share it.
+- **`extensions/http2`:** HTTP/2 server on isolates, structured like `extensions/http` (listener per shard, isolate per connection, per-shard state) and serving the same `http.Router` and `http.Context` through a small exported seam in `extensions/http` (`Router.Dispatch`, `Context.Begin/Result`). h2 over TLS 1.3 (ALPN `h2`) or h2c with prior knowledge. Full frame layer, HPACK (decoder complete; encoder stateless, literals only), two-level flow control, SETTINGS negotiation, RFC 9113 §8 request validation, limits and a control-frame rate limit against rapid-reset-style floods. One protocol per port: no HTTP/1.1 fallback. With `Config.ExtendedConnect` it also accepts the extended CONNECT of RFC 8441 and hands the stream to an `http.Tunnel` (WebSocket over h2; other streams of the connection carry on). See the package comment for what is not implemented.
+- **`extensions/websocket`:** WebSocket (RFC 6455) server. A route handler calls `Endpoint.Serve` (or `Upgrade`); the connection, once switched, is a `Conn` running inside the connection isolate. One `Endpoint` serves **ws and wss over HTTP/1.1** (Upgrade handshake, TLS from `extensions/http`) and **ws and wss over HTTP/2** (RFC 8441 extended CONNECT, `extensions/http2`), with the same callbacks (`OnOpen/OnMessage/OnPong/OnClose`) and `Conn` API on all of them. Streaming frame parser (messages split anywhere, whole messages delivered without copying), fragmentation, ping/pong with a server keep-alive, closing handshake with timeout, incremental UTF-8 validation, strict header checks, message and queue limits, a same-origin default `CheckOrigin`, subprotocol selection, panic containment in callbacks (close 1011). Other isolates, on any shard, push to a connection by its `Peer` (`Push`, `PushText`, `PushClose`; at most `MaxPush` = 91 bytes, best effort). No extensions (permessage-deflate is not negotiated) and no sending of fragmented messages.
 - **`extensions/tls`:** sans-I/O **TLS 1.3 server** written for Gina (stdlib `crypto/tls` needs a blocking connection and a goroutine per connection, and its QUIC mode rejects TCP clients), on stdlib primitives. See "Verification" for what is and is not proven.
-- **Tooling:** `bench/` (reproducible comparison against `net/http`, results, charts); `docs/BENCHMARKS.md`; examples `pingpong`, `supervised`, `shards`, `httpserver`, `https`, `sse`.
+- **Tooling:** `bench/` (reproducible comparison against `net/http`, results, charts); `docs/BENCHMARKS.md`; examples `pingpong`, `supervised`, `shards`, `httpserver`, `https`, `sse`, `http2`, `websocket` (a chat whose room is an isolate on its own shard).
 
 ### Status against this spec
 
@@ -35,7 +37,7 @@ Linux is the only platform with I/O (other platforms build, without sockets).
 |---|---|---|
 | §2 where concurrency is allowed | **Done** | Rule relaxed on 2026-10-07: concurrency lives in `threads.go` and the tests, by convention (a lint tool existed and was removed). |
 | §3 architecture | **Done** | Thread per core with in-process rings, as Tina. |
-| §4.1 isolates and effects | **Done (subset)** | No `WaitReply`/`WaitIOOrCrash`; `TypeOptions` has no `BudgetWeight`. |
+| §4.1 isolates and effects | **Done (subset)** | No `WaitReply`/`WaitIOOrCrash`; `TypeOptions` has no `BudgetWeight`. **Added:** `WaitIOOrMessage` (a message interrupts a parked read). |
 | §4.2 messages, handles, tags | **Done** | Tag values are ours; `TagIOAccept/Recv/Send`, `TagChildExit` added. |
 | §4.3 `Ctx` | **Partial** | Done: `SendRaw`, `Send[P]`, `SendAttach`, `Spawn`, `RegisterTimer` (+`CancelTimer`), `StopSystem`, `Listen`, `IOAccept/IORecv/IOSend`, `CloseFD`, `OwnedFD`, `LocalPort`, `IsShuttingDown`, `ShardID`, `Now`. **Missing:** `Call`/`Reply`, logging, `KeyToShard`, `IPv4/IPv6` helpers, socket option/bind/shutdown calls, `IOWrite`/`IOSendTo`/`IOSendFile`, staged send buffers, `SupervisionGroupID`/`TypeConfig`. |
 | §4.4 boot and `SystemSpec` | **Partial** | `NewSystem` validates (power-of-two sizes, id and slot limits, ring size, group ids); `Start/Run` host the shards. Added `MaxFDs`, `ResetMax`, `ResetWindow`. **Missing:** `GCConfig`, `ShardMemoryLimit`, `Mode`, `QuarantinePolicy`, `InitTimeout`. |
@@ -60,7 +62,7 @@ Linux is the only platform with I/O (other platforms build, without sockets).
 | §4.3 `SendResult` | Adds `RingFull`, `PayloadTooLarge`; `SpawnError` adds `BadFD`. |
 | Handles after a Level-2 reset | `System.BootHandle` returns the current handle of boot isolate *i*. |
 | Thread-mode GC | One shared heap and collector (Tina has no GC). |
-| (not in the original plan) | HTTP and TLS extensions; idle spin; `bench/`. TLS is implemented from the protocol because the stdlib cannot run inside an isolate. |
+| (not in the original plan) | HTTP, HTTP/2 and TLS extensions; idle spin; `bench/`. TLS is implemented from the protocol because the stdlib cannot run inside an isolate. |
 
 ### Measured results (details and caveats: `docs/BENCHMARKS.md`)
 
@@ -78,16 +80,19 @@ Against Go `net/http` on the same cores (1 to 8, loopback, 256 connections), Gin
 
 ### Verification, and what is not verified
 
-- **Automated:** 73 tests, including supervision matrices, deterministic simulation sweeps, backpressure, HTTP parser tables plus a 300k-input seeded mutation test, real-socket HTTP and HTTPS integration tests, TLS interop with Go's `crypto/tls` client across 4 key types x 2 cipher orders x 2 curves (payloads to 100 KB), and a negative control (a deliberately wrong HKDF label is caught).
+- **Automated:** 73 tests, including supervision matrices, deterministic simulation sweeps, backpressure, HTTP parser tables plus a 300k-input seeded mutation test, real-socket HTTP and HTTPS integration tests, HTTP/2 (HPACK vectors from RFC 7541, interop with Go's HTTP/2 client over TLS and h2c, and a raw-frame client that tests flow control, dozens of protocol-error cases and control-frame floods), WebSocket (a frame-parser suite that feeds random split points and checks every protocol error, and integration tests that run each scenario over ws, wss, h2c and h2 with TLS: echo, fragmentation, close handshake, keep-alive, shutdown, pushes across shards, many streams on one h2 connection, flow control with a 1000-byte window), TLS interop with Go's `crypto/tls` client across 4 key types x 2 cipher orders x 2 curves (payloads to 100 KB), and a negative control (a deliberately wrong HKDF label is caught).
 - **Threaded runtime:** cross-thread ping-pong in two modes (always-sleep, which makes every hop use the eventfd wake path, and the default spin-then-sleep), all-to-all ring traffic across 4 threads checking for loss and reordering, timers firing on sleeping shards, stop latency, graceful shutdown, panic containment on a shard thread, and concurrent HTTP and HTTPS clients against 4 `SO_REUSEPORT` shard threads. These pass under **`go test -race`**, repeated 25-40 times, with no data race, hang or lost message.
-- **By hand:** `curl` (OpenSSL 3.5) and `openssl s_client` against the HTTPS example (TLS 1.3, 200 KB echo byte-identical, TLS 1.2 refused with alert 70, plain HTTP on the TLS port closed).
+- **By hand:** `curl` (OpenSSL 3.5) and `openssl s_client` against the HTTPS example (TLS 1.3, 200 KB echo byte-identical, TLS 1.2 refused with alert 70, plain HTTP on the TLS port closed), an HPACK differential test against the `hpack` package vendored in Go's standard library (3,000 random header sequences, encoder and decoder both ways; run once and not kept in the repo), and `curl --http2` / `--http2-prior-knowledge` (nghttp2) against `examples/http2` (h2 over TLS, h2c, parallel streams on one connection, 1 MB echo byte-identical, HTTP/1.1 clients refused).
+- **WebSocket interop, by hand, not kept in the repo** (a throwaway module outside it, because the repo takes no dependencies): `gorilla/websocket` and `coder/websocket` over ws and wss (messages from 0 bytes to 5 MiB, streaming writes, ping/pong, close handshake, subprotocol; coder offers permessage-deflate and is correctly answered without it), `golang.org/x/net/http2`'s extended-CONNECT client against the HTTP/2 server (four concurrent streams on one connection, messages to 1 MiB, h2c and TLS), and Python `aiohttp` against `examples/websocket` (four clients on three shards, broadcast). All under `-race`. **No browser and not the Autobahn suite** were run.
 - **Not verified:** the TLS code has had **no security audit** and should not guard anything that matters; no GC soak or leak test; the race detector only sees the interleavings that occur; Go's native fuzzer stalled in the sandbox, so parser fuzzing relies on the seeded mutation test; benchmarks are single-machine, loopback, short runs.
 
 ### Known limitations
 
 - **Threaded mode:** while the system runs, only isolates may touch it (`Spawn`, `Send`, `Step` panic; no external injection API yet). Shard threads run user handlers concurrently, so state shared *between* isolates on different shards must be made thread-safe by the user. One shared heap and GC: a collection pauses every shard. No watchdog: a stuck handler blocks its shard. One accept per tick per listener.
 - **TLS:** no TLS 1.2, ChaCha20-Poly1305, HelloRetryRequest, resumption, 0-RTT, client certificates; handshake crypto runs inline on the shard thread (about 82 µs ECDSA, 670 µs RSA-2048).
-- **HTTP:** no chunked request bodies (501), no HTTP/2, handlers are synchronous (no waiting on other isolates until `Call`/`Reply` exists).
+- **HTTP:** no chunked request bodies (501), handlers are synchronous (no waiting on other isolates until `Call`/`Reply` exists).
+- **WebSocket:** no permessage-deflate or other extensions; pushes from other isolates are limited to one Gina message (91 bytes of data) and are best effort, so a hub that must deliver large or guaranteed messages needs a different channel; callbacks are synchronous inside the connection isolate (a slow one stalls that shard); a connection is half duplex like the HTTP servers (a peer that stops reading is dropped by the write timeout). Not run through Autobahn, not security-audited.
+- **HTTP/2:** no server push, prioritisation, plain `CONNECT` (extended CONNECT works), trailers (dropped) or event streams (501); no `Upgrade: h2c`; no HTTP/1.1 on the same port; response headers are not HPACK-indexed; each connection is half duplex (read, answer, write, read); responses and request bodies are buffered. Not run through h2spec, not security-audited.
 - **Platform:** Linux-only I/O.
 
 ### Suggested next steps, in rough priority order
@@ -98,7 +103,7 @@ Against Go `net/http` on the same cores (1 to 8, loopback, 256 connections), Gin
 4. Determinism rules for the simulator-visible core (§9.2); batched accept.
 5. `gctune`: memory limit, pressure shedding, GC policy, a soak test; evaluate whether the shared GC needs per-shard mitigation.
 6. TLS hardening: independent review, HelloRetryRequest, tickets; optionally ChaCha20 via `x/crypto`.
-7. HTTP: chunked bodies, streaming; Datastar SDK; the docs set; io_uring.
+7. HTTP: chunked bodies, streaming; Datastar SDK; the docs set; io_uring. HTTP/2: h2spec conformance run, a way to stream (SSE) over one stream of a multiplexed connection, and optionally HTTP/1.1 on the same port (ALPN-based hand-off).
 
 ---
 
@@ -419,9 +424,10 @@ gina/                         module "gina"; no external dependencies
   ctx_io.go reactor_linux.go reactor_other.go     # I/O API and the epoll reactor (stub on other OSes)
   gina_test.go threads_test.go                    # single-thread suite; threaded-runtime suite (-race)
   internal/prng/                                  # PRNG tree
-  extensions/http/   parser.go router.go context.go server.go sse.go (+ tests, incl. threads_test.go)
+  extensions/http/   parser.go router.go context.go server.go sse.go embed.go (+ tests, incl. threads_test.go)
+  extensions/http2/  server.go conn.go request.go frame.go hpack.go huffman_table.go (+ tests: hpack, interop, raw frames)
   extensions/tls/    config.go conn.go keys.go record.go alert.go (+ tests, benchmarks)
-  examples/{pingpong,supervised,shards,httpserver,https,sse}/
+  examples/{pingpong,supervised,shards,httpserver,https,sse,http2}/
   bench/             run.sh summarize.py plot.py results*.csv results*.{png,svg}  nethttp/ (separate module: comparison baseline)
   docs/BENCHMARKS.md
 ```

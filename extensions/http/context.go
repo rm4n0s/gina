@@ -23,10 +23,11 @@ type Context struct {
 	stream  bool        // EventStream: keep the connection open for pushed events
 	notify  gina.Handle // EventStream: told when the stream ends
 	tls     *gtls.Conn
+	tunnel  Tunnel // SetTunnel: the protocol that takes the connection over
 }
 
 func (c *Context) reset(g *gina.Ctx, req *Request) {
-	c.Req, c.g, c.nparams, c.tls = req, g, 0, nil
+	c.Req, c.g, c.nparams, c.tls, c.tunnel = req, g, 0, nil, nil
 	c.status, c.ctype, c.close = 200, "", false
 	c.stream, c.notify = false, 0
 	c.hdr, c.body = c.hdr[:0], c.body[:0]
@@ -192,6 +193,8 @@ func statusText(code int) string {
 	switch code {
 	case 100:
 		return "Continue"
+	case 101:
+		return "Switching Protocols"
 	case 200:
 		return "OK"
 	case 201:
@@ -236,6 +239,8 @@ func statusText(code int) string {
 		return "Unsupported Media Type"
 	case 422:
 		return "Unprocessable Content"
+	case 426:
+		return "Upgrade Required"
 	case 429:
 		return "Too Many Requests"
 	case 431:

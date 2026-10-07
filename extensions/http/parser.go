@@ -27,6 +27,11 @@ type Request struct {
 	Body          []byte
 	ContentLength int
 	KeepAlive     bool
+	// Protocol is the :protocol pseudo-header of an HTTP/2 extended CONNECT
+	// (RFC 8441), e.g. "websocket". Such a request is presented with Method "GET"
+	// so that one route serves both HTTP versions. Nil on HTTP/1.1 and on
+	// ordinary HTTP/2 requests.
+	Protocol []byte
 }
 
 // Header returns the first value of a header (case-insensitive) or nil.

@@ -24,6 +24,7 @@ type isoType struct {
 	mboxCap int
 	stride  int // mboxCap+1: one extra slot so an I/O completion can always be pushed to the front
 	ioop    []int32
+	intr    []bool // parked in WaitIOOrMessage: a message interrupts the pending read
 	ownfd   []FDHandle
 	gen     []uint32
 	state   []uint8
@@ -39,7 +40,7 @@ func newIsoType(d TypeDesc) *isoType {
 	o := d.opts
 	t := &isoType{
 		id: d.id, ops: d.build(o), slots: o.SlotCount, mboxCap: o.MailboxCapacity, stride: o.MailboxCapacity + 1,
-		ioop: make([]int32, o.SlotCount), ownfd: make([]FDHandle, o.SlotCount),
+		ioop: make([]int32, o.SlotCount), intr: make([]bool, o.SlotCount), ownfd: make([]FDHandle, o.SlotCount),
 		gen: make([]uint32, o.SlotCount), state: make([]uint8, o.SlotCount),
 		mbuf:  make([]uint32, o.SlotCount*(o.MailboxCapacity+1)),
 		mhead: make([]uint32, o.SlotCount), mlen: make([]uint32, o.SlotCount),
@@ -221,6 +222,7 @@ func (s *Shard) freeSlot(t *isoType, slot uint32) {
 		s.io.cancelOp(op)
 		t.ioop[slot] = -1
 	}
+	t.intr[slot] = false
 	if fd := t.ownfd[slot]; fd != 0 {
 		t.ownfd[slot] = 0
 		s.io.closeFD(fd)
@@ -273,10 +275,22 @@ func (s *Shard) enqueue(to Handle, m *Message, att any, system bool) SendResult 
 	pos := (t.mhead[slot] + t.mlen[slot]) % uint32(t.stride)
 	t.mbuf[int(slot)*t.stride+int(pos)] = idx
 	t.mlen[slot]++
-	if t.state[slot] == stIdle {
+	switch {
+	case t.state[slot] == stIdle:
 		s.makeReady(t, slot)
+	case t.intr[slot]: // parked in WaitIOOrMessage: cut the read short so the mail is seen
+		s.interrupt(t, slot)
 	}
 	return SendOK
+}
+
+// interrupt completes the pending read of an isolate parked in WaitIOOrMessage
+// with -ECANCELED. The completion goes to the front of the mailbox.
+func (s *Shard) interrupt(t *isoType, slot uint32) {
+	t.intr[slot] = false
+	if oi := t.ioop[slot]; oi >= 0 {
+		s.io.finish(oi, -int64(syscall.ECANCELED))
+	}
 }
 
 func (s *Shard) route(to Handle, m *Message, att any) SendResult {
@@ -397,6 +411,7 @@ func (s *Shard) dispatch() bool {
 func (s *Shard) turn(t *isoType, slot uint32) {
 	self := s.handleOf(t, slot)
 	t.state[slot] = stRunning
+	t.intr[slot] = false
 	idx, has := s.mboxPop(t, slot)
 	var msg *Message
 	var att any
@@ -435,6 +450,20 @@ func (s *Shard) turn(t *isoType, slot uint32) {
 		} else {
 			t.state[slot] = stWaitIO
 			s.io.submit(self, t, slot, &staged)
+		}
+	case effWaitAny:
+		if staged.kind != ioRecv && staged.kind != ioAccept { // only a read can be interrupted
+			s.stats.Crashes++
+			s.terminate(t, slot, ExitCrashed)
+		} else {
+			t.state[slot] = stWaitIO
+			s.io.submit(self, t, slot, &staged)
+			if t.state[slot] == stWaitIO && t.ioop[slot] >= 0 { // not completed inline
+				t.intr[slot] = true
+				if t.mlen[slot] > 0 { // mail is already waiting: do not park behind it
+					s.interrupt(t, slot)
+				}
+			}
 		}
 	default: // effCrash, or a zero Effect (contract violation)
 		s.stats.Crashes++
@@ -574,7 +603,7 @@ func (s *Shard) wipe() {
 			t.mhead[slot], t.mlen[slot] = 0, 0
 			t.cref[slot] = noRef
 			t.parent[slot] = 0
-			t.ioop[slot], t.ownfd[slot] = -1, 0
+			t.ioop[slot], t.ownfd[slot], t.intr[slot] = -1, 0, false
 		}
 		t.refill()
 	}

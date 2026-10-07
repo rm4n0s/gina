@@ -22,7 +22,8 @@ import (
 
 func main() {
 	port := flag.Int("port", 8080, "port")
-	useTLS := flag.Bool("tls", false, "serve HTTPS (TLS 1.3 only, HTTP/1.1 only, ECDSA P-256 like Gina's self-signed cert)")
+	useTLS := flag.Bool("tls", false, "serve HTTPS (TLS 1.3 only, HTTP/1.1 only unless -h2, ECDSA P-256 like Gina's self-signed cert)")
+	h2 := flag.Bool("h2", false, "serve HTTP/2 only (h2 over TLS with -tls, h2c with prior knowledge otherwise) instead of HTTP/1.1")
 	flag.Parse()
 
 	mux := http.NewServeMux()
@@ -47,9 +48,20 @@ func main() {
 		der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 		// SessionTicketsDisabled: Gina's TLS has no resumption, so don't charge net/http for issuing tickets.
 		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS13, SessionTicketsDisabled: true, Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}}
-		srv.TLSNextProto = map[string]func(*http.Server, *tls.Conn, http.Handler){} // no HTTP/2: same protocol as Gina
+		if !*h2 {
+			srv.TLSNextProto = map[string]func(*http.Server, *tls.Conn, http.Handler){} // no HTTP/2: same protocol as Gina
+		}
 	}
-	fmt.Printf("net/http baseline on :%d tls=%v GOMAXPROCS=%d\n", *port, *useTLS, runtime.GOMAXPROCS(0))
+	if *h2 { // HTTP/2 only, like extensions/http2
+		var p http.Protocols
+		if *useTLS {
+			p.SetHTTP2(true)
+		} else {
+			p.SetUnencryptedHTTP2(true)
+		}
+		srv.Protocols = &p
+	}
+	fmt.Printf("net/http baseline on :%d tls=%v h2=%v GOMAXPROCS=%d\n", *port, *useTLS, *h2, runtime.GOMAXPROCS(0))
 	var err error
 	if *useTLS {
 		err = srv.ListenAndServeTLS("", "")

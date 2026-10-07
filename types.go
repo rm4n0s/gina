@@ -287,6 +287,23 @@ const effWaitIO EffectKind = 5
 // IORecv / IOSend completes; the completion arrives as the next message.
 func WaitIO() Effect { return Effect{Kind: effWaitIO} }
 
+const effWaitAny EffectKind = 6
+
+// WaitIOOrMessage is WaitIO for a read-side operation (IOAccept or IORecv) that
+// a message may interrupt. The isolate parks until the operation completes or
+// until any message is delivered to it. In the second case the operation is
+// cancelled and its completion arrives first, as -ECANCELED, followed by the
+// messages that were waiting; the isolate re-stages the read once it has dealt
+// with them. A message that is already queued when the isolate parks interrupts
+// the read at once, so mail is never left behind a parked read.
+//
+// A duplex connection needs this: it must read from its socket and still hear
+// from other isolates. Writes are not interruptible (cancelling one would leave a
+// partial send), so use WaitIO for IOSend. Returning WaitIOOrMessage without a
+// staged IOAccept/IORecv is a contract violation and crashes the isolate; so is
+// returning it from an init handler.
+func WaitIOOrMessage() Effect { return Effect{Kind: effWaitAny} }
+
 // IOResult is the payload of every I/O completion: a byte count (or, for accept,
 // a new FDHandle) when >= 0, otherwise -errno.
 type IOResult struct{ Result int64 }

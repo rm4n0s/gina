@@ -5,6 +5,7 @@
 #
 #   bench/run.sh                      # full matrix (about 10 minutes)
 #   DURATION=2 RUNS=1 CORES="1 2" SCENARIOS=get bench/run.sh    # quick look
+#   PROTO=h2 bench/run.sh             # the same matrix over HTTP/2 (h2c and h2 over TLS), results in bench/results-h2.csv
 #
 # The server is confined to physical cores 0..N-1 (taskset) and the load
 # generator (oha) to a disjoint set of physical cores, so they never compete.
@@ -14,16 +15,19 @@ set -u
 cd "$(dirname "$0")/.."
 DURATION=${DURATION:-5}      # seconds per measured run
 RUNS=${RUNS:-3}              # measured runs per configuration (median is reported)
-CONNS=${CONNS:-256}          # concurrent connections
+PROTO=${PROTO:-h1}           # h1 = HTTP/1.1 (examples/httpserver), h2 = HTTP/2 (examples/http2, net/http -h2)
+if [ "$PROTO" = h2 ]; then CONNS=${CONNS:-64}; else CONNS=${CONNS:-256}; fi   # concurrent connections
+STREAMS=${STREAMS:-4}        # h2: concurrent streams per connection (oha -p), so 64 x 4 = the 256 requests in flight of the h1 runs
 CORES=${CORES:-"1 2 4 8"}
-SCENARIOS=${SCENARIOS:-"get newconn echo64k"}
+# oha ignores --disable-keepalive over HTTP/2 (it multiplexes on its connections), so "newconn" would just repeat "get"
+if [ "$PROTO" = h2 ]; then SCENARIOS=${SCENARIOS:-"get echo64k"}; else SCENARIOS=${SCENARIOS:-"get newconn echo64k"}; fi
 CLIENT_CPUS=${CLIENT_CPUS:-"8-15,24-31"}
 SERVERS=${SERVERS:-"gina nethttp"}
 TLS_MODES=${TLS_MODES:-"plain tls"}
-OUT=${OUT:-bench/results.csv}
+if [ "$PROTO" = h2 ]; then OUT=${OUT:-bench/results-h2.csv}; else OUT=${OUT:-bench/results.csv}; fi
 BIN=${BIN:-$(mktemp -d)}
 
-go build -o "$BIN/gina" ./examples/httpserver || exit 1
+if [ "$PROTO" = h2 ]; then go build -o "$BIN/gina" ./examples/http2 || exit 1; else go build -o "$BIN/gina" ./examples/httpserver || exit 1; fi
 (cd bench/nethttp && go build -o "$BIN/nethttp" .) || exit 1
 head -c 65536 /dev/urandom > "$BIN/body64k.bin"
 echo "scenario,server,tls,cores,run,rps,p50_ms,p99_ms,p999_ms,success,errors,rss_mb" > "$OUT"
@@ -36,22 +40,23 @@ rss_mb() { # RSS of the server process
 one() { # scenario server tls cores
   local scenario=$1 server=$2 tls=$3 cores=$4
   port=$((port + 1))
-  local cpus="0-$((cores - 1))" scheme=http tlsflag="" ohaflags="--insecure --http-version 1.1" url path=/hello/bench
+  local cpus="0-$((cores - 1))" scheme=http tlsflag="" ohaflags="--insecure --http-version 1.1" url path=/hello/bench curlflag="" nhflags=""
+  if [ "$PROTO" = h2 ]; then ohaflags="--insecure --http2 -p $STREAMS"; curlflag=--http2-prior-knowledge; nhflags=-h2; fi
   [ "$tls" = tls ] && scheme=https && tlsflag="-tls"
   case $server in
     gina)    taskset -c "$cpus" "$BIN/gina" -port $port -shards $cores -pin $tlsflag >/dev/null 2>&1 & ;; # ONE process, N shard threads
-    nethttp) GOMAXPROCS=$cores taskset -c "$cpus" "$BIN/nethttp" -port $port $tlsflag >/dev/null 2>&1 & ;;
+    nethttp) GOMAXPROCS=$cores taskset -c "$cpus" "$BIN/nethttp" -port $port $nhflags $tlsflag >/dev/null 2>&1 & ;;
   esac
   local pid=$!
   url="$scheme://127.0.0.1:$port"
   for _ in $(seq 100); do
-    [ "$(curl -sk -o /dev/null -w '%{http_code}' "$url/hello/x" 2>/dev/null)" = 200 ] && break
+    [ "$(curl -sk $curlflag -o /dev/null -w '%{http_code}' "$url/hello/x" 2>/dev/null)" = 200 ] && break
     sleep 0.1
   done
   local extra="" conns=$CONNS
   case $scenario in
     newconn) extra="--disable-keepalive" ;;
-    echo64k) path=/echo; extra="-m POST -D $BIN/body64k.bin -H Content-Type:application/octet-stream"; conns=64 ;;
+    echo64k) path=/echo; extra="-m POST -D $BIN/body64k.bin -H Content-Type:application/octet-stream"; conns=64; [ "$PROTO" = h2 ] && conns=16 ;;
   esac
   taskset -c "$CLIENT_CPUS" oha -z 1s -c "$conns" --no-tui $ohaflags $extra "$url$path" >/dev/null 2>&1 # warm-up
   local r
