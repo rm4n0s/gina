@@ -25,11 +25,13 @@
 // the call. A Conn must not be used outside its callbacks; other isolates, on any
 // shard, reach it through its Peer with Push, a message to the connection isolate
 // that the isolate delivers while it waits for the peer (it parks in
-// gina.WaitIOOrMessage). Pushes are limited to MaxPush bytes, the size of a Gina
-// message, and are best effort: a full mailbox (raise Config.ConnMailbox of the
-// HTTP server), an exhausted message pool, or a closed connection drops them.
-// A hub that broadcasts keeps the Peers its OnOpen handed it and removes them
-// when OnClose says so.
+// gina.WaitIOOrMessage). A push can be any size up to the System's
+// MaxMessageBytes (Gina carries long messages beside the envelope), and a
+// broadcast should build its message once with NewShared and give every
+// connection the same one with PushShared. Pushes are best effort: a full mailbox
+// (raise ConnMailbox of the HTTP server), an exhausted message pool or a closed
+// connection drops them. A hub that broadcasts keeps the Peers its OnOpen handed
+// it and removes them when OnClose says so.
 //
 // # What is implemented
 //
@@ -56,13 +58,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"gina"
 	ghttp "gina/extensions/http"
 )
-
-// MaxPush is the most data Push can carry: a message payload less the stream id
-// and the opcode.
-const MaxPush = ghttp.MaxTunnelPush - 1
 
 // MailboxCapacity is a sensible ConnMailbox for the HTTP servers when many pushes
 // arrive per connection between its turns (a broadcast hub).
@@ -274,40 +271,4 @@ func equalFold(b []byte, s string) bool {
 		}
 	}
 	return true
-}
-
-// ---- pushing from other isolates ----
-
-// Push sends a text or binary message to the connection at to, from any isolate
-// on any shard. data is at most MaxPush bytes. Delivery is best effort (see the
-// package comment); the result says whether the message was handed to Gina, not
-// whether it reached the peer.
-func Push(g *gina.Ctx, to Peer, op Opcode, data []byte) gina.SendResult {
-	if len(data) > MaxPush || (op != OpText && op != OpBinary && op != OpPing) {
-		return gina.SendPayloadTooLarge
-	}
-	var b [ghttp.MaxTunnelPush]byte
-	b[0] = byte(op)
-	n := copy(b[1:], data)
-	return ghttp.SendTunnel(g, to.Conn, uint32(to.Stream), b[:1+n])
-}
-
-// PushText is Push with a string.
-func PushText(g *gina.Ctx, to Peer, s string) gina.SendResult {
-	if len(s) > MaxPush {
-		return gina.SendPayloadTooLarge
-	}
-	var b [ghttp.MaxTunnelPush]byte
-	b[0] = byte(OpText)
-	n := copy(b[1:], s)
-	return ghttp.SendTunnel(g, to.Conn, uint32(to.Stream), b[:1+n])
-}
-
-// PushClose asks the connection at to to start the closing handshake. reason is
-// cut to fit a message.
-func PushClose(g *gina.Ctx, to Peer, code uint16, reason string) gina.SendResult {
-	var b [ghttp.MaxTunnelPush]byte
-	b[0], b[1], b[2] = byte(OpClose), byte(code>>8), byte(code)
-	n := copy(b[3:], reason)
-	return ghttp.SendTunnel(g, to.Conn, uint32(to.Stream), b[:3+n])
 }

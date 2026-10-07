@@ -397,8 +397,8 @@ func (s *Server) connHandler(cs *connState, g *gina.Ctx, m *gina.Message) gina.E
 		if cs.tun == nil {
 			return gina.WaitMessage() // not (or no longer) a tunnel: nobody to give it to
 		}
-		if cs.tunOpen && !cs.closeAfter && m.PayloadSize >= 4 {
-			cs.tun.Push(g, m.Payload[4:m.PayloadSize])
+		if cs.tunOpen && !cs.closeAfter {
+			cs.tun.Push(g, g.Data())
 		}
 		return gina.Yield() // more mail may be queued: take it all before writing
 	case gina.TagYield:

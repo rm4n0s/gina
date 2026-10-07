@@ -202,10 +202,8 @@ func (c *Conn) Push(g *gina.Ctx, p []byte) {
 	}
 	c.enter(g)
 	switch op := Opcode(p[0]); op {
-	case OpText:
-		c.queue(OpText, p[1:])
-	case OpBinary:
-		c.queue(OpBinary, p[1:])
+	case OpText, OpBinary:
+		c.Send(op, p[1:])
 	case OpPing:
 		c.Ping(p[1:])
 	case OpClose:

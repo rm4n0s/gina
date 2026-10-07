@@ -83,6 +83,12 @@ type SystemSpec struct {
 	MaxFDs        int    // sockets per shard (default 4096)
 	ResetMax      int    // Level-2 resets allowed within ResetWindow before quarantine (default 3)
 	ResetWindow   uint64 // ticks (default 10000)
+
+	// MaxMessageBytes is the largest message data SendRaw and SendBlob accept
+	// (default 16 MiB). Longer than MaxPayload it lives outside the envelope: a
+	// mailbox full of large messages holds that much memory, so size the mailboxes
+	// and PoolSlots of the types that receive them with this in mind.
+	MaxMessageBytes int
 }
 
 func (s SystemSpec) normalize() (SystemSpec, error) {
@@ -109,6 +115,12 @@ func (s SystemSpec) normalize() (SystemSpec, error) {
 	}
 	if s.MaxFDs == 0 {
 		s.MaxFDs = 4096
+	}
+	if s.MaxMessageBytes == 0 {
+		s.MaxMessageBytes = 16 << 20
+	}
+	if s.MaxMessageBytes < MaxPayload {
+		return s, errors.New("gina: MaxMessageBytes must be at least MaxPayload")
 	}
 	if s.ResetMax == 0 {
 		s.ResetMax = 3

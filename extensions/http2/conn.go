@@ -215,9 +215,9 @@ func (s *Server) connHandler(cs *conn, g *gina.Ctx, m *gina.Message) gina.Effect
 		cs.sendLen = 0
 		return s.step(cs, g)
 	case ghttp.TagTunnel:
-		if m.PayloadSize >= 4 && !cs.closeAfter {
-			if st := cs.streams[binary.BigEndian.Uint32(m.Payload[:4])]; st != nil && st.tun != nil && !st.tunClosed {
-				st.tun.Push(g, m.Payload[4:m.PayloadSize])
+		if !cs.closeAfter {
+			if st := cs.streams[m.Correlation]; st != nil && st.tun != nil && !st.tunClosed {
+				st.tun.Push(g, g.Data())
 			}
 		}
 		return gina.Yield() // more mail may be queued: take it all before writing

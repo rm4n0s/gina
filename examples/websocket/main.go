@@ -36,12 +36,14 @@ import (
 	ws "gina/extensions/websocket"
 )
 
+const maxLine = 4096
+
 const (
 	typeHub = 1 // application type; the http extensions use 200..211
 
 	tagJoin  = gina.TagUserBase     // payload ws.Peer
 	tagLeave = gina.TagUserBase + 1 // payload ws.Peer
-	tagLine  = gina.TagUserBase + 2 // raw bytes: one line of chat to broadcast
+	tagLine  = gina.TagUserBase + 2 // data: one line of chat to broadcast (any length)
 )
 
 // ---- the hub ----
@@ -61,9 +63,12 @@ func hubHandler(h *hub, g *gina.Ctx, m *gina.Message) gina.Effect {
 			}
 		}
 	case tagLine:
-		line := string(m.Payload[:m.PayloadSize])
+		line, err := ws.NewShared(ws.OpText, g.Data()) // one copy of the line, however many peers
+		if err != nil {
+			break
+		}
 		for _, p := range h.peers {
-			ws.PushText(g, p, line) // best effort: a peer that is gone or swamped just misses it
+			ws.PushShared(g, p, line) // best effort: a peer that is gone or swamped just misses it
 		}
 	case gina.TagShutdown:
 		return gina.Done()
@@ -116,9 +121,8 @@ func main() {
 				c.Close(ws.CloseUnsupportedData, "text only")
 				return
 			}
-			// "name: text" must fit in one message to the hub (ws.MaxPush bytes)
 			line := append([]byte(c.Data.(string)+": "), bytes.TrimSpace(data)...)
-			for len(line) > ws.MaxPush {
+			for len(line) > maxLine { // lines are broadcast, so keep them modest; the engine would carry more
 				_, n := utf8.DecodeLastRune(line)
 				line = line[:len(line)-n]
 			}

@@ -128,10 +128,11 @@ func (sys *System) Spawn(shard int, sp SpawnSpec) (Handle, SpawnError) {
 	return sys.shards[shard].spawn(&sp, 0)
 }
 
-// Send injects a message from outside the system.
+// Send injects a message from outside the system. Data longer than MaxPayload
+// (up to SystemSpec.MaxMessageBytes) is delivered as a large message.
 func (sys *System) Send(to Handle, tag Tag, payload []byte) SendResult {
 	sys.assertStopped("Send")
-	if len(payload) > MaxPayload {
+	if len(payload) > sys.spec.MaxMessageBytes {
 		return SendPayloadTooLarge
 	}
 	if int(to.Shard()) >= len(sys.shards) || sys.shards[to.Shard()].quarantined.Load() {
@@ -139,8 +140,15 @@ func (sys *System) Send(to Handle, tag Tag, payload []byte) SendResult {
 	}
 	var m Message
 	m.Tag = tag
-	m.PayloadSize = uint16(copy(m.Payload[:], payload))
-	return sys.shards[to.Shard()].enqueue(to, &m, nil, false)
+	var att any
+	if len(payload) > MaxPayload {
+		m.Flags, m.PayloadSize = FlagLarge, MaxPayload
+		copy(m.Payload[:], payload)
+		att = &Blob{b: append([]byte(nil), payload...)}
+	} else {
+		m.PayloadSize = uint16(copy(m.Payload[:], payload))
+	}
+	return sys.shards[to.Shard()].enqueue(to, &m, att, false)
 }
 
 // SendTo injects a typed payload from outside the system.

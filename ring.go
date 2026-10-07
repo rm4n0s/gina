@@ -32,14 +32,17 @@ type ring struct {
 
 	// cold, read-only after construction
 	buf  []Message
+	att  []any // att[i] is the large-message buffer of buf[i], if it has one
 	mask uint64
 }
 
-func newRing(n int) *ring { return &ring{buf: make([]Message, n), mask: uint64(n - 1)} }
+func newRing(n int) *ring {
+	return &ring{buf: make([]Message, n), att: make([]any, n), mask: uint64(n - 1)}
+}
 
 // stage writes m into the next slot; false means the ring is full (the sender
 // learns immediately, nothing overflows).
-func (r *ring) stage(m *Message) bool {
+func (r *ring) stage(m *Message, att any) bool {
 	if r.staged-r.cachedRead >= uint64(len(r.buf)) {
 		r.cachedRead = r.read.Load() // only now touch the consumer's line
 		if r.staged-r.cachedRead >= uint64(len(r.buf)) {
@@ -47,6 +50,7 @@ func (r *ring) stage(m *Message) bool {
 		}
 	}
 	r.buf[r.staged&r.mask] = *m
+	r.att[r.staged&r.mask] = att // visible to the consumer through the same publish as the message
 	r.staged++
 	return true
 }
@@ -65,24 +69,34 @@ func (r *ring) publish() bool {
 func (r *ring) producerPending() bool { return r.published != r.staged }
 
 // peek returns the next published message without consuming it.
-func (r *ring) peek() (*Message, bool) {
+func (r *ring) peek() (*Message, any, bool) {
 	if r.localRead == r.cachedWrite {
 		r.cachedWrite = r.write.Load() // only now touch the producer's line
 		if r.localRead == r.cachedWrite {
-			return nil, false
+			return nil, nil, false
 		}
 	}
-	return &r.buf[r.localRead&r.mask], true
+	i := r.localRead & r.mask
+	return &r.buf[i], r.att[i], true
 }
 
-func (r *ring) advance() { r.localRead++ }
+// advance consumes the message peek returned; its buffer reference is dropped
+// here, before commit hands the slot back to the producer.
+func (r *ring) advance() {
+	r.att[r.localRead&r.mask] = nil
+	r.localRead++
+}
 
 // commit returns the consumed slots to the producer (once per drain).
 func (r *ring) commit() { r.read.Store(r.localRead) }
 
 // discard drops everything published so far (a quarantined shard).
 func (r *ring) discard() {
-	r.localRead = r.write.Load()
+	end := r.write.Load()
+	for i := r.localRead; i != end; i++ {
+		r.att[i&r.mask] = nil
+	}
+	r.localRead = end
 	r.cachedWrite = r.localRead
 	r.commit()
 }

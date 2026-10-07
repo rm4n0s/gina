@@ -187,13 +187,13 @@ def build_h2():
 
     head = [
         text(M, 62, "Gina vs Go net/http, HTTP/2", 34, "ink", 700),
-        text(M, 94, "HTTP/2 only on both sides. Same cores, same routes, same bodies. Loopback, 64 connections x 4 streams, median of two 4 s runs per point.", 15, "ink2"),
+        text(M, 94, "HTTP/2 only on both sides. Same cores, same routes, same bodies. Loopback, 64 connections x 4 streams, median of three 5 s runs per point.", 15, "ink2"),
         text(M, 116, "Server pinned to N physical cores; the oha load generator runs on separate cores. Gina: one process, N pinned shard threads (Tina's model).", 15, "ink2"),
         legend(W - M, 62),
     ]
     fy = H - 76
     foot = [
-        text(M, fy, "Gina's 4- and 8-core points are probably limited by the load generator (4 to 8 cores adds only 6%), so those ratios are lower bounds.", 13, "ink2"),
+        text(M, fy, f"Gina's 4- and 8-core points are probably limited by the load generator (4 to 8 cores adds only {100 * (med('get', 'plain', 8, 'gina', 'rps') / med('get', 'plain', 4, 'gina', 'rps') - 1):.0f}%), so those ratios are lower bounds.", 13, "ink2"),
         text(M, fy + 20, "Not a feature-equal comparison: net/http is a complete, hardened server; Gina's HTTP/2 has no push, priorities or trailers, and its TLS 1.3 is unaudited.", 13, "ink2"),
         text(M, fy + 40, "Shard threads share one Go heap and GC. One machine (AMD Ryzen AI MAX+ 395), Go 1.26, oha 1.16, 2026-10-07. Tables and caveats: docs/BENCHMARKS.md.", 13, "ink2"),
     ]
@@ -241,7 +241,7 @@ def build():
 
     head = [
         text(M, 62, "Gina vs Go net/http", 34, "ink", 700),
-        text(M, 94, "Same cores, same routes, same bodies. Loopback HTTP/1.1, 256 connections, median of two 4 s runs per point.", 15, "ink2"),
+        text(M, 94, "Same cores, same routes, same bodies. Loopback HTTP/1.1, 256 connections, median of three 5 s runs per point.", 15, "ink2"),
         text(M, 116, "Server pinned to N physical cores; the oha load generator runs on separate cores. Gina: one process, N pinned shard threads (Tina's model).", 15, "ink2"),
         legend(W - M, 62),
     ]

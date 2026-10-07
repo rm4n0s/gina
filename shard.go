@@ -297,7 +297,7 @@ func (s *Shard) route(to Handle, m *Message, att any) SendResult {
 	if to.Shard() == s.id {
 		return s.enqueue(to, m, att, false)
 	}
-	if att != nil {
+	if att != nil && m.Flags&FlagLarge == 0 { // only the engine's own immutable buffers may cross shards
 		return SendAttachNotLocal
 	}
 	if int(to.Shard()) >= len(s.sys.shards) {
@@ -311,7 +311,7 @@ func (s *Shard) route(to Handle, m *Message, att any) SendResult {
 		return SendOK // lost in transit: the sender cannot tell
 	}
 	m.Dest = to
-	if !s.out[to.Shard()].stage(m) {
+	if !s.out[to.Shard()].stage(m, att) {
 		return SendRingFull
 	}
 	return SendOK
@@ -355,12 +355,12 @@ func (s *Shard) drainInbound() bool {
 		}
 		got := false
 		for {
-			m, ok := r.peek()
+			m, att, ok := r.peek()
 			if !ok {
 				break
 			}
 			got = true
-			if s.enqueue(m.Dest, m, nil, false) != SendOK {
+			if s.enqueue(m.Dest, m, att, false) != SendOK {
 				s.stats.Dropped++
 			}
 			r.advance()
@@ -421,7 +421,7 @@ func (s *Shard) turn(t *isoType, slot uint32) {
 		s.yieldMsg = Message{Dest: self, Tag: TagYield}
 		msg = &s.yieldMsg
 	}
-	s.ctx = Ctx{s: s, self: self, t: t, slot: slot, att: att}
+	s.ctx = Ctx{s: s, self: self, t: t, slot: slot, att: att, msg: msg}
 	eff := s.runTurn(t, slot, msg)
 	if tr := s.sys.trace; tr != nil {
 		tr.add(s.tick, s.id, t.id, slot, msg.Tag, eff)
@@ -747,6 +747,7 @@ type Ctx struct {
 	t      *isoType
 	slot   uint32
 	att    any
+	msg    *Message // the message being handled (nil in init)
 	staged ioStage
 }
 
@@ -759,17 +760,87 @@ func (c *Ctx) Now() uint64          { return c.s.sys.clock.Now() }
 // valid for the current turn only.
 func (c *Ctx) Attachment() any { return c.att }
 
+// SendRaw sends data to an isolate. Up to MaxPayload bytes travel in the message
+// envelope; more (up to SystemSpec.MaxMessageBytes) is copied into a buffer the
+// engine owns and delivered beside it, on the same shard or across shards, with
+// the same ordering and best-effort rules as any message (a full mailbox or ring
+// drops it and the buffer is simply garbage collected). The sender may reuse
+// payload at once.
 func (c *Ctx) SendRaw(to Handle, tag Tag, payload []byte) SendResult {
-	if len(payload) > MaxPayload {
+	return c.SendCorr(to, tag, 0, payload)
+}
+
+// SendCorr is SendRaw with the message's Correlation field set: a number the
+// receiver reads back unchanged (a request id, a stream id, ...).
+func (c *Ctx) SendCorr(to Handle, tag Tag, corr uint32, payload []byte) SendResult {
+	var m Message
+	m.Source, m.Tag, m.Correlation = c.self, tag, corr
+	if len(payload) <= MaxPayload {
+		m.PayloadSize = uint16(copy(m.Payload[:], payload))
+		return c.s.route(to, &m, nil)
+	}
+	if len(payload) > c.s.sys.spec.MaxMessageBytes {
+		return SendPayloadTooLarge
+	}
+	m.Flags, m.PayloadSize = FlagLarge, MaxPayload
+	copy(m.Payload[:], payload)
+	return c.s.route(to, &m, &Blob{b: append([]byte(nil), payload...)})
+}
+
+// Blob is an immutable buffer that can be sent to many isolates without being
+// copied: build it once with NewBlob and give it to SendBlob for each receiver.
+// A broadcast of n bytes to k isolates then costs n bytes, not k*n. Nobody may
+// modify the data, receivers included (they all see the same memory, possibly on
+// different threads).
+type Blob struct{ b []byte }
+
+// NewBlob copies data into a new Blob.
+func NewBlob(data []byte) *Blob { return &Blob{b: append([]byte(nil), data...)} }
+
+// AdoptBlob is NewBlob without the copy: the Blob takes ownership of data, which
+// the caller must not touch afterwards.
+func AdoptBlob(data []byte) *Blob { return &Blob{b: data} }
+
+// Bytes returns the Blob's data, which must not be modified.
+func (b *Blob) Bytes() []byte { return b.b }
+
+// SendBlob sends a Blob (of any size up to SystemSpec.MaxMessageBytes) with the
+// given Correlation. Receivers read it with Ctx.Data. A Blob of at most
+// MaxPayload bytes is sent inline.
+func (c *Ctx) SendBlob(to Handle, tag Tag, corr uint32, b *Blob) SendResult {
+	if len(b.b) <= MaxPayload {
+		return c.SendCorr(to, tag, corr, b.b)
+	}
+	if len(b.b) > c.s.sys.spec.MaxMessageBytes {
 		return SendPayloadTooLarge
 	}
 	var m Message
-	m.Source, m.Tag = c.self, tag
-	m.PayloadSize = uint16(copy(m.Payload[:], payload))
-	return c.s.route(to, &m, nil)
+	m.Source, m.Tag, m.Correlation = c.self, tag, corr
+	m.Flags, m.PayloadSize = FlagLarge, MaxPayload
+	copy(m.Payload[:], b.b)
+	return c.s.route(to, &m, b)
 }
 
-// Send sends a pointer-free payload value (<= 96 bytes, no padding).
+// Data returns all the data of the message being handled: its Payload, or for a
+// large message the whole buffer. Prefer it to reading Payload when senders may
+// send more than MaxPayload bytes. A large message's data is not recycled and may
+// be kept after the turn, but must not be modified; a small one is a view into
+// the envelope and is only valid during the turn.
+func (c *Ctx) Data() []byte {
+	switch {
+	case c.msg == nil:
+		return nil
+	case c.msg.Flags&FlagLarge != 0:
+		if b, ok := c.att.(*Blob); ok {
+			return b.b
+		}
+		return nil
+	}
+	return c.msg.Payload[:c.msg.PayloadSize]
+}
+
+// Send sends a pointer-free payload value (<= 96 bytes, no padding). Typed values
+// are always inline; for longer data use SendRaw or SendBlob and Ctx.Data.
 func Send[P any](c *Ctx, to Handle, tag Tag, p *P) SendResult {
 	checkPOD[P](MaxPayload)
 	var m Message

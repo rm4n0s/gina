@@ -18,25 +18,23 @@ import (
 // SendTunnel.
 
 // TagTunnel is delivered to a connection isolate that carries a tunnel. The
-// payload is a 4-byte big-endian stream id (0 on HTTP/1.1) followed by the bytes
-// given to SendTunnel; the server strips the id and calls Tunnel.Push.
+// message's Correlation is the stream id (0 on HTTP/1.1) and its data (Ctx.Data)
+// what was given to SendTunnel; the server calls Tunnel.Push with it.
 const TagTunnel gina.Tag = gina.TagUserBase + 0x12
 
-// MaxTunnelPush is the most SendTunnel can carry: a message payload less the
-// stream id.
-const MaxTunnelPush = gina.MaxPayload - 4
-
 // SendTunnel pushes payload to the tunnel on stream of connection conn (stream is
-// 0 on HTTP/1.1). Delivery is best effort: a full mailbox, an exhausted message
-// pool or a connection that is gone drops it.
+// 0 on HTTP/1.1), from any isolate on any shard. The payload may be any size up
+// to the system's MaxMessageBytes; it is copied. Delivery is best effort: a full
+// mailbox, an exhausted message pool or a connection that is gone drops it.
 func SendTunnel(g *gina.Ctx, conn gina.Handle, stream uint32, payload []byte) gina.SendResult {
-	if len(payload) > MaxTunnelPush {
-		return gina.SendPayloadTooLarge
-	}
-	var b [gina.MaxPayload]byte
-	b[0], b[1], b[2], b[3] = byte(stream>>24), byte(stream>>16), byte(stream>>8), byte(stream)
-	n := copy(b[4:], payload)
-	return g.SendRaw(conn, TagTunnel, b[:4+n])
+	return g.SendCorr(conn, TagTunnel, stream, payload)
+}
+
+// SendTunnelBlob is SendTunnel for a payload shared between many receivers, which
+// is then not copied for each (gina.Blob). A broadcast sends one Blob to every
+// connection.
+func SendTunnelBlob(g *gina.Ctx, conn gina.Handle, stream uint32, payload *gina.Blob) gina.SendResult {
+	return g.SendBlob(conn, TagTunnel, stream, payload)
 }
 
 // Tunnel is a protocol running over an upgraded connection or stream.
@@ -47,7 +45,7 @@ type Tunnel interface {
 	// Receive is given bytes from the peer, in order. It must consume all of them:
 	// the slice is only valid during the call and may be modified in place.
 	Receive(g *gina.Ctx, b []byte)
-	// Push delivers a message from SendTunnel (payload without the stream id).
+	// Push delivers a message from SendTunnel. payload is only valid during the call.
 	Push(g *gina.Ctx, payload []byte)
 	// Outgoing returns bytes waiting to be sent; Sent reports that the first n of
 	// them have been taken (written, or queued for the wire). A server may call

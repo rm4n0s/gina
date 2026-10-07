@@ -17,6 +17,10 @@ import (
 )
 
 const (
+	// MaxPayload is how much of a message's data fits in its fixed 128-byte
+	// envelope. Longer data is allowed (see Blob and Ctx.SendRaw): it travels beside
+	// the envelope, and the envelope's Payload then holds only its first MaxPayload
+	// bytes. Typed payloads (Send, PayloadAs) are always inline and so limited to this.
 	MaxPayload      = 96
 	MaxInitArgs     = 64
 	MaxSlotsPerType = 1<<20 - 1
@@ -54,7 +58,13 @@ const (
 	TagUserBase  Tag = 0x40
 )
 
-// Message is the fixed 128-byte envelope.
+// FlagLarge marks a message whose data is longer than MaxPayload. The data is an
+// immutable buffer owned by the engine, read with Ctx.Data; Payload holds its
+// first MaxPayload bytes and PayloadSize is MaxPayload.
+const FlagLarge uint16 = 1
+
+// Message is the fixed 128-byte envelope. Correlation is free for the sender to
+// use (a request id, a stream id): it arrives unchanged.
 type Message struct {
 	Source      Handle
 	Dest        Handle
@@ -66,6 +76,10 @@ type Message struct {
 	_           uint16
 	Payload     [MaxPayload]byte
 }
+
+// IsLarge reports whether the message's data is longer than MaxPayload, in which
+// case Payload holds only a prefix and Ctx.Data returns all of it.
+func (m *Message) IsLarge() bool { return m.Flags&FlagLarge != 0 }
 
 // Compile-time size assertions: both fail to compile unless Sizeof(Message) == 128.
 const _ = uint(128 - unsafe.Sizeof(Message{}))

@@ -431,6 +431,7 @@ const (
 	tagJoin   = gina.TagUserBase + 0x70
 	tagLeave  = gina.TagUserBase + 0x71
 	tagBcast  = gina.TagUserBase + 0x72
+	tagShare  = gina.TagUserBase + 0x73
 	hubShard  = 1
 	typeCount = 1
 )
@@ -462,9 +463,14 @@ func hubHandler(h *hub, g *gina.Ctx, m *gina.Message) gina.Effect {
 			}
 		}
 		h.n.Store(int32(len(h.peers)))
-	case tagBcast:
+	case tagBcast: // one copy per peer
 		for _, p := range h.peers {
-			ws.PushText(g, p, string(m.Payload[:m.PayloadSize]))
+			ws.PushText(g, p, string(g.Data()))
+		}
+	case tagShare: // one copy for all
+		sh, _ := ws.NewShared(ws.OpText, g.Data())
+		for _, p := range h.peers {
+			ws.PushShared(g, p, sh)
 		}
 	case gina.TagShutdown:
 		return gina.Done()
@@ -491,6 +497,10 @@ func hubConfig() ws.Config {
 		OnMessage: func(c *ws.Conn, op ws.Opcode, data []byte) {
 			if rest, ok := bytes.CutPrefix(data, []byte("bcast ")); ok {
 				c.Gina().SendRaw(hubH, tagBcast, rest)
+				return
+			}
+			if rest, ok := bytes.CutPrefix(data, []byte("share ")); ok {
+				c.Gina().SendRaw(hubH, tagShare, rest)
 				return
 			}
 			c.Send(op, data)
@@ -547,22 +557,57 @@ func TestPushFromAnotherShardAndBroadcast(t *testing.T) {
 	})
 }
 
-func TestStaleAndOversizePushesAreHarmless(t *testing.T) {
-	var n atomic.Int32
-	s := startServer(t, h1, hubConfig(), hubOpts(&n))
-	c, _ := s.dial(dialOpts{})
-	c.deadline(5 * time.Second)
-	c.expectText("welcome")
-	long := bytes.Repeat([]byte("x"), ws.MaxPush+1)
-	if r := ws.PushText(nil2g(), ws.Peer{}, string(long)); r != gina.SendPayloadTooLarge {
-		t.Fatalf("oversize push: %v", r)
-	}
-	c.writeFrame(true, ws.OpText, []byte("still works"))
-	c.expectText("still works")
+func TestLongPushesAndSharedBroadcast(t *testing.T) {
+	forAll(t, func(t *testing.T, p proto) {
+		var n atomic.Int32
+		s := startServer(t, p, ws.Config{MaxMessageSize: 1 << 20, OnOpen: hubConfig().OnOpen, OnClose: hubConfig().OnClose,
+			OnMessage: hubConfig().OnMessage}, hubOpts(&n))
+		var cs []*client
+		for i := 0; i < 3; i++ {
+			c, _ := s.dial(dialOpts{})
+			c.deadline(10 * time.Second)
+			c.expectText("welcome")
+			cs = append(cs, c)
+		}
+		waitFor(t, "hub to know 3 peers", func() bool { return n.Load() == 3 })
+
+		// every length around the inline limit, through both ways of pushing
+		for _, size := range []int{94, 95, 96, 97, 5000, 200_000} {
+			text := strings.Repeat("é", size/2) + strings.Repeat("x", size%2) // valid UTF-8, size bytes
+			for _, verb := range []string{"bcast ", "share "} {
+				cs[0].writeFrame(true, ws.OpText, []byte(verb+text))
+				for i, c := range cs {
+					if op, got := c.readMsg(); op != ws.OpText || string(got) != text {
+						t.Fatalf("%s%d bytes, client %d: op %d, %d bytes back", verb, size, i, op, len(got))
+					}
+				}
+			}
+		}
+		// the message that was too long to push before still arrives in order with small ones
+		for i := 0; i < 20; i++ {
+			text := fmt.Sprintf("n%02d", i)
+			if i%4 == 0 {
+				text += strings.Repeat("-", 30000)
+			}
+			cs[1].writeFrame(true, ws.OpText, []byte("share "+text))
+		}
+		for j := 0; j < 20; j++ {
+			_, got := cs[2].readMsg()
+			if !strings.HasPrefix(string(got), fmt.Sprintf("n%02d", j)) {
+				t.Fatalf("message %d: %.8q", j, got)
+			}
+		}
+	})
 }
 
-// nil2g returns a nil context: Push rejects an oversize payload before using it.
-func nil2g() *gina.Ctx { return nil }
+func TestSharedMessageChecks(t *testing.T) {
+	if _, err := ws.NewShared(ws.OpText, []byte{0xff}); err != ws.ErrBadMessage {
+		t.Fatalf("bad UTF-8: %v", err)
+	}
+	if _, err := ws.NewShared(ws.OpPing, nil); err != ws.ErrBadOpcode {
+		t.Fatalf("control opcode: %v", err)
+	}
+}
 
 // ---- HTTP/2 specifics ----
 

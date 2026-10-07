@@ -3,14 +3,14 @@
 <desc id="d">Six small charts comparing Gina (shard threads in one process) with Go net/http on 1 to 8 cores: keep-alive throughput over HTTP and HTTPS, TLS handshakes per second, p99 latency, a 64 KiB echo test and memory use. Gina is faster on every throughput and latency measure; Gina uses about the same memory as net/http on HTTP and about three times as much on HTTPS. The same numbers are tabulated in docs/BENCHMARKS.md.</desc>
 <rect width="1800" height="1214" fill="#fcfcfb"/>
 <text x="56.0" y="62.0" font-size="34" font-weight="700" text-anchor="start" fill="#0b0b0b">Gina vs Go net/http</text>
-<text x="56.0" y="94.0" font-size="15" font-weight="400" text-anchor="start" fill="#52514e">Same cores, same routes, same bodies. Loopback HTTP/1.1, 256 connections, median of two 4 s runs per point.</text>
+<text x="56.0" y="94.0" font-size="15" font-weight="400" text-anchor="start" fill="#52514e">Same cores, same routes, same bodies. Loopback HTTP/1.1, 256 connections, median of three 5 s runs per point.</text>
 <text x="56.0" y="116.0" font-size="15" font-weight="400" text-anchor="start" fill="#52514e">Server pinned to N physical cores; the oha load generator runs on separate cores. Gina: one process, N pinned shard threads (Tina's model).</text>
 <polygon points="1538.5,49.9 1545.6,57.0 1538.5,64.1 1531.4,57.0" fill="#eb6834"/>
 <text x="1553.5" y="62.0" font-size="14" font-weight="400" text-anchor="start" fill="#52514e">net/http (GOMAXPROCS = N)</text>
 <circle cx="1253.6" cy="57.0" r="5" fill="#2a78d6"/>
 <text x="1268.6" y="62.0" font-size="14" font-weight="400" text-anchor="start" fill="#52514e">Gina, shard threads (one process)</text>
 <g transform="translate(56.0,168.0)">
-<text x="0.0" y="22.0" font-size="19" font-weight="600" text-anchor="start" fill="#0b0b0b">Keep-alive GET, HTTP: 1.6–1.9× throughput</text>
+<text x="0.0" y="22.0" font-size="19" font-weight="600" text-anchor="start" fill="#0b0b0b">Keep-alive GET, HTTP: 1.5–1.9× throughput</text>
 <text x="0.0" y="46.0" font-size="14" font-weight="400" text-anchor="start" fill="#52514e">Requests per second (thousands) · higher is better</text>
 <line x1="54.0" x2="390.7" y1="384.0" y2="384.0" stroke="#c3c2b7" stroke-width="1"/>
 <text x="44.0" y="388.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">0</text>
@@ -25,21 +25,21 @@
 <text x="271.1" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">4</text>
 <text x="368.7" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">8</text>
 <text x="222.3" y="432.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">server cores</text>
-<polyline points="76.0,362.6 173.6,346.2 271.1,307.5 368.7,258.7" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-<polygon points="76.0,352.6 85.9,362.6 76.0,372.5 66.1,362.6" fill="#fcfcfb"/><polygon points="76.0,355.5 83.1,362.6 76.0,369.7 68.9,362.6" fill="#eb6834"/>
-<polygon points="173.6,336.2 183.5,346.2 173.6,356.1 163.6,346.2" fill="#fcfcfb"/><polygon points="173.6,339.1 180.7,346.2 173.6,353.3 166.5,346.2" fill="#eb6834"/>
-<polygon points="271.1,297.6 281.1,307.5 271.1,317.5 261.2,307.5" fill="#fcfcfb"/><polygon points="271.1,300.4 278.2,307.5 271.1,314.6 264.0,307.5" fill="#eb6834"/>
-<polygon points="368.7,248.8 378.6,258.7 368.7,268.6 358.7,258.7" fill="#fcfcfb"/><polygon points="368.7,251.6 375.8,258.7 368.7,265.8 361.6,258.7" fill="#eb6834"/>
-<text x="383.7" y="263.7" font-size="14" fill="#52514e">net/http <tspan font-weight="600" fill="#0b0b0b">644k</tspan></text>
-<polyline points="76.0,350.5 173.6,312.6 271.1,248.6 368.7,148.2" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-<circle cx="76.0" cy="350.5" r="7" fill="#fcfcfb"/><circle cx="76.0" cy="350.5" r="5" fill="#2a78d6"/>
-<circle cx="173.6" cy="312.6" r="7" fill="#fcfcfb"/><circle cx="173.6" cy="312.6" r="5" fill="#2a78d6"/>
-<circle cx="271.1" cy="248.6" r="7" fill="#fcfcfb"/><circle cx="271.1" cy="248.6" r="5" fill="#2a78d6"/>
-<circle cx="368.7" cy="148.2" r="7" fill="#fcfcfb"/><circle cx="368.7" cy="148.2" r="5" fill="#2a78d6"/>
-<text x="383.7" y="153.2" font-size="14" fill="#52514e">Gina <tspan font-weight="600" fill="#0b0b0b">1,211k</tspan></text>
+<polyline points="76.0,362.5 173.6,347.1 271.1,306.4 368.7,255.1" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<polygon points="76.0,352.6 85.9,362.5 76.0,372.5 66.1,362.5" fill="#fcfcfb"/><polygon points="76.0,355.4 83.1,362.5 76.0,369.6 68.9,362.5" fill="#eb6834"/>
+<polygon points="173.6,337.1 183.5,347.1 173.6,357.0 163.6,347.1" fill="#fcfcfb"/><polygon points="173.6,340.0 180.7,347.1 173.6,354.2 166.5,347.1" fill="#eb6834"/>
+<polygon points="271.1,296.4 281.1,306.4 271.1,316.3 261.2,306.4" fill="#fcfcfb"/><polygon points="271.1,299.3 278.2,306.4 271.1,313.5 264.0,306.4" fill="#eb6834"/>
+<polygon points="368.7,245.2 378.6,255.1 368.7,265.0 358.7,255.1" fill="#fcfcfb"/><polygon points="368.7,248.0 375.8,255.1 368.7,262.2 361.6,255.1" fill="#eb6834"/>
+<text x="383.7" y="260.1" font-size="14" fill="#52514e">net/http <tspan font-weight="600" fill="#0b0b0b">662k</tspan></text>
+<polyline points="76.0,351.0 173.6,313.7 271.1,247.4 368.7,147.4" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="76.0" cy="351.0" r="7" fill="#fcfcfb"/><circle cx="76.0" cy="351.0" r="5" fill="#2a78d6"/>
+<circle cx="173.6" cy="313.7" r="7" fill="#fcfcfb"/><circle cx="173.6" cy="313.7" r="5" fill="#2a78d6"/>
+<circle cx="271.1" cy="247.4" r="7" fill="#fcfcfb"/><circle cx="271.1" cy="247.4" r="5" fill="#2a78d6"/>
+<circle cx="368.7" cy="147.4" r="7" fill="#fcfcfb"/><circle cx="368.7" cy="147.4" r="5" fill="#2a78d6"/>
+<text x="383.7" y="152.4" font-size="14" fill="#52514e">Gina <tspan font-weight="600" fill="#0b0b0b">1,215k</tspan></text>
 </g>
 <g transform="translate(634.7,168.0)">
-<text x="0.0" y="22.0" font-size="19" font-weight="600" text-anchor="start" fill="#0b0b0b">Keep-alive GET, HTTPS: 1.6–1.9× throughput</text>
+<text x="0.0" y="22.0" font-size="19" font-weight="600" text-anchor="start" fill="#0b0b0b">Keep-alive GET, HTTPS: 1.5–1.8× throughput</text>
 <text x="0.0" y="46.0" font-size="14" font-weight="400" text-anchor="start" fill="#52514e">Requests per second (thousands) · higher is better</text>
 <line x1="54.0" x2="390.7" y1="384.0" y2="384.0" stroke="#c3c2b7" stroke-width="1"/>
 <text x="44.0" y="388.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">0</text>
@@ -58,21 +58,21 @@
 <text x="271.1" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">4</text>
 <text x="368.7" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">8</text>
 <text x="222.3" y="432.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">server cores</text>
-<polyline points="76.0,361.2 173.6,342.5 271.1,298.9 368.7,239.5" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-<polygon points="76.0,351.3 85.9,361.2 76.0,371.2 66.1,361.2" fill="#fcfcfb"/><polygon points="76.0,354.1 83.1,361.2 76.0,368.3 68.9,361.2" fill="#eb6834"/>
-<polygon points="173.6,332.6 183.5,342.5 173.6,352.5 163.6,342.5" fill="#fcfcfb"/><polygon points="173.6,335.4 180.7,342.5 173.6,349.6 166.5,342.5" fill="#eb6834"/>
-<polygon points="271.1,289.0 281.1,298.9 271.1,308.9 261.2,298.9" fill="#fcfcfb"/><polygon points="271.1,291.8 278.2,298.9 271.1,306.0 264.0,298.9" fill="#eb6834"/>
-<polygon points="368.7,229.5 378.6,239.5 368.7,249.4 358.7,239.5" fill="#fcfcfb"/><polygon points="368.7,232.4 375.8,239.5 368.7,246.6 361.6,239.5" fill="#eb6834"/>
-<text x="383.7" y="244.5" font-size="14" fill="#52514e">net/http <tspan font-weight="600" fill="#0b0b0b">619k</tspan></text>
-<polyline points="76.0,348.3 173.6,307.2 271.1,238.0 368.7,136.2" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-<circle cx="76.0" cy="348.3" r="7" fill="#fcfcfb"/><circle cx="76.0" cy="348.3" r="5" fill="#2a78d6"/>
-<circle cx="173.6" cy="307.2" r="7" fill="#fcfcfb"/><circle cx="173.6" cy="307.2" r="5" fill="#2a78d6"/>
-<circle cx="271.1" cy="238.0" r="7" fill="#fcfcfb"/><circle cx="271.1" cy="238.0" r="5" fill="#2a78d6"/>
-<circle cx="368.7" cy="136.2" r="7" fill="#fcfcfb"/><circle cx="368.7" cy="136.2" r="5" fill="#2a78d6"/>
-<text x="383.7" y="141.2" font-size="14" fill="#52514e">Gina <tspan font-weight="600" fill="#0b0b0b">1,061k</tspan></text>
+<polyline points="76.0,360.8 173.6,340.9 271.1,296.5 368.7,241.2" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<polygon points="76.0,350.8 85.9,360.8 76.0,370.7 66.1,360.8" fill="#fcfcfb"/><polygon points="76.0,353.7 83.1,360.8 76.0,367.9 68.9,360.8" fill="#eb6834"/>
+<polygon points="173.6,331.0 183.5,340.9 173.6,350.9 163.6,340.9" fill="#fcfcfb"/><polygon points="173.6,333.8 180.7,340.9 173.6,348.0 166.5,340.9" fill="#eb6834"/>
+<polygon points="271.1,286.5 281.1,296.5 271.1,306.4 261.2,296.5" fill="#fcfcfb"/><polygon points="271.1,289.4 278.2,296.5 271.1,303.6 264.0,296.5" fill="#eb6834"/>
+<polygon points="368.7,231.2 378.6,241.2 368.7,251.1 358.7,241.2" fill="#fcfcfb"/><polygon points="368.7,234.1 375.8,241.2 368.7,248.3 361.6,241.2" fill="#eb6834"/>
+<text x="383.7" y="246.2" font-size="14" fill="#52514e">net/http <tspan font-weight="600" fill="#0b0b0b">611k</tspan></text>
+<polyline points="76.0,348.4 173.6,305.7 271.1,239.4 368.7,145.4" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="76.0" cy="348.4" r="7" fill="#fcfcfb"/><circle cx="76.0" cy="348.4" r="5" fill="#2a78d6"/>
+<circle cx="173.6" cy="305.7" r="7" fill="#fcfcfb"/><circle cx="173.6" cy="305.7" r="5" fill="#2a78d6"/>
+<circle cx="271.1" cy="239.4" r="7" fill="#fcfcfb"/><circle cx="271.1" cy="239.4" r="5" fill="#2a78d6"/>
+<circle cx="368.7" cy="145.4" r="7" fill="#fcfcfb"/><circle cx="368.7" cy="145.4" r="5" fill="#2a78d6"/>
+<text x="383.7" y="150.4" font-size="14" fill="#52514e">Gina <tspan font-weight="600" fill="#0b0b0b">1,021k</tspan></text>
 </g>
 <g transform="translate(1213.3,168.0)">
-<text x="0.0" y="22.0" font-size="19" font-weight="600" text-anchor="start" fill="#0b0b0b">TLS handshakes: 1.7–2.9× more per second</text>
+<text x="0.0" y="22.0" font-size="19" font-weight="600" text-anchor="start" fill="#0b0b0b">TLS handshakes: 1.6–3.0× more per second</text>
 <text x="0.0" y="46.0" font-size="14" font-weight="400" text-anchor="start" fill="#52514e">New TLS 1.3 connection per request (thousands/s) · higher is better</text>
 <line x1="54.0" x2="390.7" y1="384.0" y2="384.0" stroke="#c3c2b7" stroke-width="1"/>
 <text x="44.0" y="388.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">0</text>
@@ -87,21 +87,21 @@
 <text x="271.1" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">4</text>
 <text x="368.7" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">8</text>
 <text x="222.3" y="432.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">server cores</text>
-<polyline points="76.0,358.7 173.6,338.7 271.1,316.3 368.7,299.2" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-<polygon points="76.0,348.8 85.9,358.7 76.0,368.7 66.1,358.7" fill="#fcfcfb"/><polygon points="76.0,351.6 83.1,358.7 76.0,365.8 68.9,358.7" fill="#eb6834"/>
-<polygon points="173.6,328.7 183.5,338.7 173.6,348.6 163.6,338.7" fill="#fcfcfb"/><polygon points="173.6,331.6 180.7,338.7 173.6,345.8 166.5,338.7" fill="#eb6834"/>
-<polygon points="271.1,306.4 281.1,316.3 271.1,326.2 261.2,316.3" fill="#fcfcfb"/><polygon points="271.1,309.2 278.2,316.3 271.1,323.4 264.0,316.3" fill="#eb6834"/>
-<polygon points="368.7,289.3 378.6,299.2 368.7,309.1 358.7,299.2" fill="#fcfcfb"/><polygon points="368.7,292.1 375.8,299.2 368.7,306.3 361.6,299.2" fill="#eb6834"/>
-<text x="383.7" y="304.2" font-size="14" fill="#52514e">net/http <tspan font-weight="600" fill="#0b0b0b">17.4k</tspan></text>
-<polyline points="76.0,341.6 173.6,303.2 271.1,233.0 368.7,139.0" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-<circle cx="76.0" cy="341.6" r="7" fill="#fcfcfb"/><circle cx="76.0" cy="341.6" r="5" fill="#2a78d6"/>
-<circle cx="173.6" cy="303.2" r="7" fill="#fcfcfb"/><circle cx="173.6" cy="303.2" r="5" fill="#2a78d6"/>
-<circle cx="271.1" cy="233.0" r="7" fill="#fcfcfb"/><circle cx="271.1" cy="233.0" r="5" fill="#2a78d6"/>
-<circle cx="368.7" cy="139.0" r="7" fill="#fcfcfb"/><circle cx="368.7" cy="139.0" r="5" fill="#2a78d6"/>
-<text x="383.7" y="144.0" font-size="14" fill="#52514e">Gina <tspan font-weight="600" fill="#0b0b0b">50.3k</tspan></text>
+<polyline points="76.0,357.6 173.6,338.5 271.1,314.1 368.7,300.0" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<polygon points="76.0,347.6 85.9,357.6 76.0,367.5 66.1,357.6" fill="#fcfcfb"/><polygon points="76.0,350.5 83.1,357.6 76.0,364.7 68.9,357.6" fill="#eb6834"/>
+<polygon points="173.6,328.6 183.5,338.5 173.6,348.4 163.6,338.5" fill="#fcfcfb"/><polygon points="173.6,331.4 180.7,338.5 173.6,345.6 166.5,338.5" fill="#eb6834"/>
+<polygon points="271.1,304.2 281.1,314.1 271.1,324.1 261.2,314.1" fill="#fcfcfb"/><polygon points="271.1,307.0 278.2,314.1 271.1,321.2 264.0,314.1" fill="#eb6834"/>
+<polygon points="368.7,290.1 378.6,300.0 368.7,310.0 358.7,300.0" fill="#fcfcfb"/><polygon points="368.7,292.9 375.8,300.0 368.7,307.1 361.6,300.0" fill="#eb6834"/>
+<text x="383.7" y="305.0" font-size="14" fill="#52514e">net/http <tspan font-weight="600" fill="#0b0b0b">17.3k</tspan></text>
+<polyline points="76.0,341.1 173.6,302.9 271.1,227.9 368.7,131.5" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="76.0" cy="341.1" r="7" fill="#fcfcfb"/><circle cx="76.0" cy="341.1" r="5" fill="#2a78d6"/>
+<circle cx="173.6" cy="302.9" r="7" fill="#fcfcfb"/><circle cx="173.6" cy="302.9" r="5" fill="#2a78d6"/>
+<circle cx="271.1" cy="227.9" r="7" fill="#fcfcfb"/><circle cx="271.1" cy="227.9" r="5" fill="#2a78d6"/>
+<circle cx="368.7" cy="131.5" r="7" fill="#fcfcfb"/><circle cx="368.7" cy="131.5" r="5" fill="#2a78d6"/>
+<text x="383.7" y="136.5" font-size="14" fill="#52514e">Gina <tspan font-weight="600" fill="#0b0b0b">51.9k</tspan></text>
 </g>
 <g transform="translate(56.0,656.0)">
-<text x="0.0" y="22.0" font-size="19" font-weight="600" text-anchor="start" fill="#0b0b0b">p99 latency, HTTP: 2.6–5.6× lower</text>
+<text x="0.0" y="22.0" font-size="19" font-weight="600" text-anchor="start" fill="#0b0b0b">p99 latency, HTTP: 2.8–5.6× lower</text>
 <text x="0.0" y="46.0" font-size="14" font-weight="400" text-anchor="start" fill="#52514e">Keep-alive GET, milliseconds · lower is better</text>
 <line x1="54.0" x2="390.7" y1="384.0" y2="384.0" stroke="#c3c2b7" stroke-width="1"/>
 <text x="44.0" y="388.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">0</text>
@@ -116,21 +116,21 @@
 <text x="271.1" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">4</text>
 <text x="368.7" y="408.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">8</text>
 <text x="222.3" y="432.0" font-size="13" font-weight="400" text-anchor="middle" fill="#52514e">server cores</text>
-<polyline points="76.0,157.8 173.6,170.6 271.1,263.8 368.7,288.9" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-<polygon points="76.0,147.9 85.9,157.8 76.0,167.7 66.1,157.8" fill="#fcfcfb"/><polygon points="76.0,150.7 83.1,157.8 76.0,164.9 68.9,157.8" fill="#eb6834"/>
-<polygon points="173.6,160.7 183.5,170.6 173.6,180.6 163.6,170.6" fill="#fcfcfb"/><polygon points="173.6,163.5 180.7,170.6 173.6,177.7 166.5,170.6" fill="#eb6834"/>
-<polygon points="271.1,253.9 281.1,263.8 271.1,273.8 261.2,263.8" fill="#fcfcfb"/><polygon points="271.1,256.7 278.2,263.8 271.1,270.9 264.0,263.8" fill="#eb6834"/>
-<polygon points="368.7,278.9 378.6,288.9 368.7,298.8 358.7,288.9" fill="#fcfcfb"/><polygon points="368.7,281.8 375.8,288.9 368.7,296.0 361.6,288.9" fill="#eb6834"/>
-<text x="383.7" y="293.9" font-size="14" fill="#52514e">net/http <tspan font-weight="600" fill="#0b0b0b">1.95 ms</tspan></text>
-<polyline points="76.0,297.2 173.6,341.6 271.1,360.4 368.7,366.9" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-<circle cx="76.0" cy="297.2" r="7" fill="#fcfcfb"/><circle cx="76.0" cy="297.2" r="5" fill="#2a78d6"/>
-<circle cx="173.6" cy="341.6" r="7" fill="#fcfcfb"/><circle cx="173.6" cy="341.6" r="5" fill="#2a78d6"/>
-<circle cx="271.1" cy="360.4" r="7" fill="#fcfcfb"/><circle cx="271.1" cy="360.4" r="5" fill="#2a78d6"/>
-<circle cx="368.7" cy="366.9" r="7" fill="#fcfcfb"/><circle cx="368.7" cy="366.9" r="5" fill="#2a78d6"/>
-<text x="383.7" y="371.9" font-size="14" fill="#52514e">Gina <tspan font-weight="600" fill="#0b0b0b">0.35 ms</tspan></text>
+<polyline points="76.0,160.1 173.6,146.0 271.1,267.1 368.7,292.1" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<polygon points="76.0,150.1 85.9,160.1 76.0,170.0 66.1,160.1" fill="#fcfcfb"/><polygon points="76.0,153.0 83.1,160.1 76.0,167.2 68.9,160.1" fill="#eb6834"/>
+<polygon points="173.6,136.0 183.5,146.0 173.6,155.9 163.6,146.0" fill="#fcfcfb"/><polygon points="173.6,138.9 180.7,146.0 173.6,153.1 166.5,146.0" fill="#eb6834"/>
+<polygon points="271.1,257.2 281.1,267.1 271.1,277.0 261.2,267.1" fill="#fcfcfb"/><polygon points="271.1,260.0 278.2,267.1 271.1,274.2 264.0,267.1" fill="#eb6834"/>
+<polygon points="368.7,282.2 378.6,292.1 368.7,302.1 358.7,292.1" fill="#fcfcfb"/><polygon points="368.7,285.0 375.8,292.1 368.7,299.2 361.6,292.1" fill="#eb6834"/>
+<text x="383.7" y="297.1" font-size="14" fill="#52514e">net/http <tspan font-weight="600" fill="#0b0b0b">1.89 ms</tspan></text>
+<polyline points="76.0,302.9 173.6,341.8 271.1,360.9 368.7,366.4" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="76.0" cy="302.9" r="7" fill="#fcfcfb"/><circle cx="76.0" cy="302.9" r="5" fill="#2a78d6"/>
+<circle cx="173.6" cy="341.8" r="7" fill="#fcfcfb"/><circle cx="173.6" cy="341.8" r="5" fill="#2a78d6"/>
+<circle cx="271.1" cy="360.9" r="7" fill="#fcfcfb"/><circle cx="271.1" cy="360.9" r="5" fill="#2a78d6"/>
+<circle cx="368.7" cy="366.4" r="7" fill="#fcfcfb"/><circle cx="368.7" cy="366.4" r="5" fill="#2a78d6"/>
+<text x="383.7" y="371.4" font-size="14" fill="#52514e">Gina <tspan font-weight="600" fill="#0b0b0b">0.36 ms</tspan></text>
 </g>
 <g transform="translate(634.7,656.0)">
-<text x="0.0" y="22.0" font-size="19" font-weight="600" text-anchor="start" fill="#0b0b0b">64 KiB echo, 4 cores: 4.0× HTTP, 2.2× HTTPS</text>
+<text x="0.0" y="22.0" font-size="19" font-weight="600" text-anchor="start" fill="#0b0b0b">64 KiB echo, 4 cores: 3.8× HTTP, 2.0× HTTPS</text>
 <text x="0.0" y="46.0" font-size="14" font-weight="400" text-anchor="start" fill="#52514e">POST /echo, requests per second (thousands) · higher is better</text>
 <line x1="54.0" x2="510.7" y1="384.0" y2="384.0" stroke="#c3c2b7" stroke-width="1"/>
 <text x="44.0" y="388.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">0</text>
@@ -144,21 +144,21 @@
 <text x="44.0" y="154.9" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">200</text>
 <line x1="54.0" x2="510.7" y1="92.0" y2="92.0" stroke="#e1e0d9" stroke-width="1"/>
 <text x="44.0" y="96.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">250</text>
-<path d="M137.2,384.0 V136.2 A4,4 0 0 1 141.2,132.2 H155.2 A4,4 0 0 1 159.2,136.2 V384.0 Z" fill="#2a78d6"/>
-<text x="148.2" y="124.2" font-size="13" font-weight="600" text-anchor="middle" fill="#0b0b0b">216k</text>
-<path d="M177.2,384.0 V325.2 A4,4 0 0 1 181.2,321.2 H195.2 A4,4 0 0 1 199.2,325.2 V384.0 Z" fill="#eb6834"/>
-<text x="188.2" y="313.2" font-size="13" font-weight="600" text-anchor="middle" fill="#0b0b0b">54k</text>
+<path d="M137.2,384.0 V165.1 A4,4 0 0 1 141.2,161.1 H155.2 A4,4 0 0 1 159.2,165.1 V384.0 Z" fill="#2a78d6"/>
+<text x="148.2" y="153.1" font-size="13" font-weight="600" text-anchor="middle" fill="#0b0b0b">191k</text>
+<path d="M177.2,384.0 V328.9 A4,4 0 0 1 181.2,324.9 H195.2 A4,4 0 0 1 199.2,328.9 V384.0 Z" fill="#eb6834"/>
+<text x="188.2" y="316.9" font-size="13" font-weight="600" text-anchor="middle" fill="#0b0b0b">51k</text>
 <text x="168.2" y="408.0" font-size="14" font-weight="500" text-anchor="middle" fill="#0b0b0b">HTTP</text>
-<text x="168.2" y="428.0" font-size="12" font-weight="400" text-anchor="middle" fill="#52514e">Gina 4.0× net/http</text>
-<path d="M365.5,384.0 V293.3 A4,4 0 0 1 369.5,289.3 H383.5 A4,4 0 0 1 387.5,293.3 V384.0 Z" fill="#2a78d6"/>
-<text x="376.5" y="281.3" font-size="13" font-weight="600" text-anchor="middle" fill="#0b0b0b">81k</text>
+<text x="168.2" y="428.0" font-size="12" font-weight="400" text-anchor="middle" fill="#52514e">Gina 3.8× net/http</text>
+<path d="M365.5,384.0 V298.6 A4,4 0 0 1 369.5,294.6 H383.5 A4,4 0 0 1 387.5,298.6 V384.0 Z" fill="#2a78d6"/>
+<text x="376.5" y="286.6" font-size="13" font-weight="600" text-anchor="middle" fill="#0b0b0b">77k</text>
 <path d="M405.5,384.0 V344.2 A4,4 0 0 1 409.5,340.2 H423.5 A4,4 0 0 1 427.5,344.2 V384.0 Z" fill="#eb6834"/>
-<text x="416.5" y="332.2" font-size="13" font-weight="600" text-anchor="middle" fill="#0b0b0b">37k</text>
+<text x="416.5" y="332.2" font-size="13" font-weight="600" text-anchor="middle" fill="#0b0b0b">38k</text>
 <text x="396.5" y="408.0" font-size="14" font-weight="500" text-anchor="middle" fill="#0b0b0b">HTTPS (TLS 1.3)</text>
-<text x="396.5" y="428.0" font-size="12" font-weight="400" text-anchor="middle" fill="#52514e">Gina 2.2× net/http</text>
+<text x="396.5" y="428.0" font-size="12" font-weight="400" text-anchor="middle" fill="#52514e">Gina 2.0× net/http</text>
 </g>
 <g transform="translate(1213.3,656.0)">
-<text x="0.0" y="22.0" font-size="19" font-weight="600" text-anchor="start" fill="#0b0b0b">Memory at 8 cores: 1.1–3.0× net/http</text>
+<text x="0.0" y="22.0" font-size="19" font-weight="600" text-anchor="start" fill="#0b0b0b">Memory at 8 cores: 1.1–4.1× net/http</text>
 <text x="0.0" y="46.0" font-size="14" font-weight="400" text-anchor="start" fill="#52514e">Resident memory of the server process (MB) · lower is better</text>
 <line x1="54.0" x2="510.7" y1="384.0" y2="384.0" stroke="#c3c2b7" stroke-width="1"/>
 <text x="44.0" y="388.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">0</text>
@@ -172,16 +172,16 @@
 <text x="44.0" y="96.5" font-size="13" font-weight="400" text-anchor="end" fill="#52514e">200</text>
 <path d="M137.2,384.0 V357.3 A4,4 0 0 1 141.2,353.3 H155.2 A4,4 0 0 1 159.2,357.3 V384.0 Z" fill="#2a78d6"/>
 <text x="148.2" y="345.3" font-size="13" font-weight="600" text-anchor="middle" fill="#0b0b0b">21</text>
-<path d="M177.2,384.0 V360.3 A4,4 0 0 1 181.2,356.3 H195.2 A4,4 0 0 1 199.2,360.3 V384.0 Z" fill="#eb6834"/>
-<text x="188.2" y="348.3" font-size="13" font-weight="600" text-anchor="middle" fill="#0b0b0b">19</text>
+<path d="M177.2,384.0 V358.8 A4,4 0 0 1 181.2,354.8 H195.2 A4,4 0 0 1 199.2,358.8 V384.0 Z" fill="#eb6834"/>
+<text x="188.2" y="346.8" font-size="13" font-weight="600" text-anchor="middle" fill="#0b0b0b">20</text>
 <text x="168.2" y="408.0" font-size="14" font-weight="500" text-anchor="middle" fill="#0b0b0b">HTTP</text>
 <text x="168.2" y="428.0" font-size="12" font-weight="400" text-anchor="middle" fill="#52514e">Gina 1.1× net/http</text>
-<path d="M365.5,384.0 V277.0 A4,4 0 0 1 369.5,273.0 H383.5 A4,4 0 0 1 387.5,277.0 V384.0 Z" fill="#2a78d6"/>
-<text x="376.5" y="265.0" font-size="13" font-weight="600" text-anchor="middle" fill="#0b0b0b">76</text>
+<path d="M365.5,384.0 V237.6 A4,4 0 0 1 369.5,233.6 H383.5 A4,4 0 0 1 387.5,237.6 V384.0 Z" fill="#2a78d6"/>
+<text x="376.5" y="225.6" font-size="13" font-weight="600" text-anchor="middle" fill="#0b0b0b">103</text>
 <path d="M405.5,384.0 V351.5 A4,4 0 0 1 409.5,347.5 H423.5 A4,4 0 0 1 427.5,351.5 V384.0 Z" fill="#eb6834"/>
 <text x="416.5" y="339.5" font-size="13" font-weight="600" text-anchor="middle" fill="#0b0b0b">25</text>
 <text x="396.5" y="408.0" font-size="14" font-weight="500" text-anchor="middle" fill="#0b0b0b">HTTPS (TLS 1.3)</text>
-<text x="396.5" y="428.0" font-size="12" font-weight="400" text-anchor="middle" fill="#52514e">Gina 3.0× net/http</text>
+<text x="396.5" y="428.0" font-size="12" font-weight="400" text-anchor="middle" fill="#52514e">Gina 4.1× net/http</text>
 </g>
 <text x="56.0" y="1158.0" font-size="13" font-weight="400" text-anchor="start" fill="#52514e">Not a feature-equal comparison: net/http is a complete, hardened server; Gina's HTTP is minimal and its TLS 1.3 is unaudited (no resumption, no ChaCha20).</text>
 <text x="56.0" y="1178.0" font-size="13" font-weight="400" text-anchor="start" fill="#52514e">Shard threads share one Go heap and GC. One machine (AMD Ryzen AI MAX+ 395), Go 1.26, oha 1.16, 2026-10-07. Tables and caveats: docs/BENCHMARKS.md.</text>
