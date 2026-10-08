@@ -1,4 +1,4 @@
-// Package tls is a sans-I/O TLS 1.3 server for Gina. It is a state machine over
+// Package tls is a sans-I/O TLS 1.3 server and client for Gina. It is a state machine over
 // bytes: feed it ciphertext read from a socket, take plaintext out; write
 // plaintext, take ciphertext to send. It never blocks, never reads a socket and
 // uses no goroutines, which is what lets it live inside an isolate (crypto/tls
@@ -12,6 +12,11 @@
 // certificates, ALPN, SNI-based certificate choice, KeyUpdate, close_notify.
 // Not supported: TLS 1.2 and earlier, ChaCha20-Poly1305, HelloRetryRequest,
 // session resumption/tickets, 0-RTT, client certificates.
+//
+// NewServer makes the server side; NewClient (client.go) the client side, which
+// offers X25519 only and verifies the server's chain with crypto/x509 against
+// ClientConfig.RootCAs and the name in ClientConfig.ServerName. Both are a Conn
+// with the same data plane.
 package tls
 
 import (

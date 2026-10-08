@@ -291,9 +291,10 @@ func podKind(t reflect.Type) error {
 
 // I/O completion tags (system range). The payload is an IOResult.
 const (
-	TagIOAccept Tag = 4
-	TagIORecv   Tag = 5
-	TagIOSend   Tag = 6
+	TagIOAccept  Tag = 4
+	TagIORecv    Tag = 5
+	TagIOSend    Tag = 6
+	TagIOConnect Tag = 7
 )
 
 const effWaitIO EffectKind = 5
@@ -350,4 +351,13 @@ type ListenSpec struct {
 	Port      uint16 // 0 picks an ephemeral port; read it back with ctx.LocalPort
 	ReusePort bool
 	Backlog   int // default 1024
+}
+
+// DialSpec describes an outbound socket: a TCP connection or a connected UDP
+// socket to one IP address. Gina does no name resolution; the caller supplies the
+// address (see extensions/webpush for a DNS client written as isolates).
+type DialSpec struct {
+	IP   netip.Addr // IPv4 or IPv6, without a zone
+	Port uint16
+	UDP  bool // a connected datagram socket instead of a TCP connection
 }

@@ -1,6 +1,6 @@
 # Gina
 
-A Go port of [pmbanugo/tina](https://github.com/pmbanugo/tina)'s concurrency model: **thread-per-core shards** (each a goroutine locked to an OS thread, optionally pinned to a core) that own their isolates, memory pool, timers and sockets, and exchange 128-byte messages through **lock-free SPSC rings**. Goroutines and channels are confined to one file (the thread host), the tests that opt in, and `extensions/webpush/transport.go` (see Web Push); everything else is single-threaded per shard. See [SPEC.md](SPEC.md) (the "Implementation status" section lists what exists and what does not).
+A Go port of [pmbanugo/tina](https://github.com/pmbanugo/tina)'s concurrency model: **thread-per-core shards** (each a goroutine locked to an OS thread, optionally pinned to a core) that own their isolates, memory pool, timers and sockets, and exchange 128-byte messages through **lock-free SPSC rings**. Goroutines and channels are confined to one file (the thread host) and the tests that opt in; everything else is single-threaded per shard. See [SPEC.md](SPEC.md) (the "Implementation status" section lists what exists and what does not).
 
 **Why this model?** Two articles by Peter Mbanugo (Tina's author) explains the reasoning:
 
@@ -66,7 +66,7 @@ cert, _ := gtls.SelfSigned("localhost")            // dev only; or gtls.LoadX509
 srv := ghttp.New(ghttp.Config{Port: 8443, TLS: &gtls.Config{Certificates: []ctls.Certificate{cert}}}, r)
 ```
 
-`extensions/tls` is a sans-I/O **TLS 1.3** server written for Gina (the standard `crypto/tls` needs a blocking connection and a goroutine per connection, so it cannot run inside an isolate). It uses stdlib crypto primitives and implements the protocol only. TLS 1.3, AES-GCM, X25519/P-256, ECDSA/Ed25519/RSA-PSS certificates, ALPN, SNI, KeyUpdate. No TLS 1.2, ChaCha20, session resumption or client certificates (see the package comment). It has been tested against Go's TLS client and OpenSSL, but has not had a security audit.
+`extensions/tls` is a sans-I/O **TLS 1.3** server and client written for Gina (the standard `crypto/tls` needs a blocking connection and a goroutine per connection, so it cannot run inside an isolate). It uses stdlib crypto primitives and implements the protocol only. TLS 1.3, AES-GCM, X25519/P-256, ECDSA/Ed25519/RSA-PSS certificates, ALPN, SNI, KeyUpdate. No TLS 1.2, ChaCha20, session resumption or client certificates (see the package comment). The client (`tls.NewClient`) offers X25519 only, checks the server's chain and name with `crypto/x509` against the roots you give it, and does not follow a HelloRetryRequest. Both sides have been tested against Go's `crypto/tls` (and the server against OpenSSL), but have not had a security audit.
 
 Scaling across cores works like Tina's `SO_REUSEPORT` setup: with `Shards: N` each shard thread binds its own listener on the same port (`ReusePort: true`) and the kernel balances connections across them.
 
@@ -150,9 +150,8 @@ srv := ghttp.New(ghttp.Config{Port: 8443, TLS: tlsCfg, ConnMailbox: websocket.Ma
 ```go
 vapid, _ := webpush.GenerateVAPID()   // once: keep vapid.PrivateKey(), give pages vapid.PublicKey()
 wp, _ := webpush.New(webpush.Config{VAPID: vapid, Subject: "mailto:ops@example.com", Shard: 2})
-wp.Install(&spec)                     // adds the sender isolate to shard 2
+wp.Install(&spec)                     // adds the sender and resolver isolates to shard 2
 sys, _ := gina.NewSystem(spec, gina.Options{})
-wp.Start(sys)                         // starts the workers that talk to push services
 
 // in any isolate, on any shard:
 sub, _ := webpush.ParseSubscription(jsonFromTheBrowser)
@@ -161,10 +160,10 @@ wp.Send(ctx, &webpush.Notification{ID: 7, Sub: sub, Payload: []byte(`{"title":"H
 // Outcome Delivered, Gone (404/410: delete the subscription), Rejected, Failed, ...
 ```
 
-- **How it fits.** `Send` is a message to a *sender isolate*, which hands the notification to a small pool of worker goroutines without blocking. A worker encrypts, signs and POSTs it, then reports the outcome back with `System.SendExternal` as a `TagResult` to the isolate that sent it (or `Notification.ReplyTo`). The pool exists because Gina's TLS is server-only and its reactor cannot connect out, so the request to the push service uses `net/http`. That is confined to `extensions/webpush/transport.go`; everything else is plain isolate code.
-- **Safe by default.** A subscriber chooses the endpoint, so the sender only connects to `https` endpoints and its dialer refuses loopback, private, link-local and carrier-grade-NAT addresses after name resolution (SSRF). It does not follow redirects. `Config.AllowInsecure` and `AllowPrivate` relax this for development.
+- **How it fits.** `Send` is a message to a *sender isolate*, which starts a *delivery isolate* for the notification (up to `Config.Workers` at once; the rest wait in a queue). The delivery encrypts, asks a *resolver isolate* for the push service's addresses (a DNS cache; a *lookup isolate* per unknown name speaks UDP to the nameservers), connects with `Ctx.Dial`, runs the TLS 1.3 client handshake, POSTs over HTTP/1.1 and reports a `TagResult` to the isolate that sent the notification (or `Notification.ReplyTo`). No goroutines, channels or locks are involved: it is all isolates on one shard, over Gina's sockets. Each notification uses its own connection, so there is no connection reuse and no HTTP/2.
+- **Safe by default.** A subscriber chooses the endpoint, so the sender only connects to `https` endpoints and refuses loopback, private, link-local and carrier-grade-NAT addresses after name resolution (SSRF); the check is on the addresses it is about to connect to. It does not follow redirects. `Config.AllowInsecure` and `AllowPrivate` relax this for development.
 - **Behaviour.** VAPID tokens are cached per push service (one signature about every 11 hours). 429, 5xx and network errors are retried (`Config.Retries`, default 2, with backoff and `Retry-After`); 404/410 report `OutcomeGone`; other 4xx report `OutcomeRejected` without retrying. Payloads up to 3993 bytes, optional padding, `TTL`, `Urgency` and `Topic`.
 - **Not implemented:** push receipts, the legacy `aesgcm` coding and GCM API keys (every current browser takes `aes128gcm` with VAPID). Delivery is best effort and at most once: a full queue, mailbox or ring drops a notification (a full queue says so in the `Result`), and work still queued when the system stops is discarded. `OutcomeDelivered` means the push service accepted the message, not that the browser showed it.
-- **Verified** against the worked example of RFC 8291 Appendix A (byte-exact), an RFC 8292 sample token, a round-trip decrypt, and integration tests on a threaded system under `-race` against a fake push service that decrypts what it receives and checks the VAPID token (outcomes, retries, queue overflow, shutdown with a request in flight, SSRF and redirect refusal); and by running `examples/webpush` as a server against such a fake push service. **No real browser and no real push service (FCM, Mozilla, Apple) has been run against it.**
+- **Verified** against the worked example of RFC 8291 Appendix A (byte-exact), an RFC 8292 sample token, a round-trip decrypt, and integration tests on a threaded system under `-race` against a fake push service (plain and TLS) that decrypts what it receives and checks the VAPID token, with a fake DNS server (outcomes, retries, `Retry-After`, timeouts, queue overflow, shutdown with a request in flight, name resolution, caching and merging of lookups, server fallback, address fallback, SSRF through DNS, certificate and name checks, malformed responses, redirect refusal). Also run once, by hand, against the real FCM, Mozilla autopush and Apple endpoints with made-up subscriptions (real DNS, system roots, TLS 1.3): each answered with a sensible HTTP status (410, 404, 400). **No real browser has received a notification from it, and no real subscription has been delivered to.**
 
 `go run ./examples/webpush` serves a page with an "Enable notifications" button, the service worker and the subscribe/notify endpoints. Service workers need `localhost` or HTTPS with a certificate the browser trusts.

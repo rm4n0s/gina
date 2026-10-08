@@ -14,6 +14,7 @@ const (
 	hsEncryptedExtensions = 8
 	hsCertificate         = 11
 	hsCertificateVerify   = 15
+	hsNewSessionTicket    = 4
 	hsFinished            = 20
 	hsKeyUpdate           = 24
 
@@ -37,13 +38,22 @@ const (
 	stWaitClientFinished
 	stConnected
 	stFailed
+
+	// client side
+	stWaitServerHello
+	stWaitEncryptedExtensions
+	stWaitCertificate
+	stWaitCertificateVerify
+	stWaitServerFinished
 )
 
-// Conn is one server-side TLS 1.3 session. It is not safe for concurrent use.
+// Conn is one TLS 1.3 session, made by NewServer or NewClient. It is not safe for
+// concurrent use.
 type Conn struct {
 	cfg *Config
 	st  state
 	err error
+	cl  *clientState // set on the client side
 
 	inStore []byte // buffered, not yet parsed ciphertext
 	in      []byte
@@ -238,6 +248,9 @@ func (c *Conn) drainHandshake() error {
 }
 
 func (c *Conn) onHandshake(typ byte, msg []byte) error {
+	if c.cl != nil {
+		return c.onClientHandshake(typ, msg)
+	}
 	switch {
 	case c.st == stWaitClientHello && typ == hsClientHello:
 		return c.onClientHello(msg)
@@ -325,7 +338,14 @@ func (r *reader) u16() int {
 	}
 	return 0
 }
+func (r *reader) u24() int {
+	if v := r.take(3); v != nil {
+		return int(v[0])<<16 | int(v[1])<<8 | int(v[2])
+	}
+	return 0
+}
 func (r *reader) vec8() []byte  { return r.take(r.u8()) }
+func (r *reader) vec24() []byte { return r.take(r.u24()) }
 func (r *reader) vec16() []byte { return r.take(r.u16()) }
 
 func u16list(b []byte) ([]uint16, bool) {

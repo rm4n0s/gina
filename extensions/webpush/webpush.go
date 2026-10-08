@@ -11,26 +11,40 @@
 //
 //	vapid, _ := webpush.GenerateVAPID() // once; keep vapid.PrivateKey() and serve vapid.PublicKey() to pages
 //	wp, _ := webpush.New(webpush.Config{VAPID: vapid, Subject: "mailto:ops@example.com", Shard: 1})
-//	wp.Install(&spec)                   // adds the sender isolate to shard 1
+//	wp.Install(&spec)                   // adds the sender and resolver isolates to shard 1
 //	sys, _ := gina.NewSystem(spec, gina.Options{})
-//	wp.Start(sys)                       // starts the workers that talk to push services
 //	...
 //	sub, _ := webpush.ParseSubscription(jsonFromTheBrowser)
 //	wp.Send(ctx, &webpush.Notification{ID: 7, Sub: sub, Payload: []byte(`{"title":"Hi"}`)})
 //
-// # Isolates and threads
+// # Isolates all the way down
 //
-// Gina's TLS is a server only and its I/O reactor cannot connect out, so the
-// request to the push service is made by a small pool of ordinary goroutines using
-// net/http (transport.go, the only file here that starts goroutines, like
-// threads.go in the engine). Everything else is plain isolate code. An isolate on
-// any shard calls Send, which is a message to the sender isolate; the sender hands
-// the notification to the pool without blocking; a worker encrypts, signs and
-// posts it, and reports the outcome back with System.SendExternal as a TagResult
-// message to the isolate that sent the notification (or Notification.ReplyTo).
-// The shard that hosts the sender does almost nothing, so any shard will do, but a
-// shard of its own keeps the crypto and the pool's wake-ups away from the
+// There are no goroutines, channels or locks here. Everything runs as isolates on
+// the shard named by Config.Shard, over Gina's own sockets (Ctx.Dial) and its TLS
+// 1.3 client (extensions/tls):
+//
+//   - sender (boot isolate): Send is a message to it. It validates the
+//     notification, signs the VAPID token (cached per push service) and starts a
+//     delivery, or queues the notification when Config.Workers are busy.
+//   - delivery (one per notification in flight): encrypts the payload, asks the
+//     resolver for the push service's addresses, connects, runs the TLS
+//     handshake, POSTs over HTTP/1.1 and reads the status and headers. It retries
+//     where that is worth it, reports a TagResult to the isolate that sent the
+//     notification (or Notification.ReplyTo) and exits.
+//   - resolver (boot isolate): a DNS cache that merges concurrent requests for a
+//     name and starts a lookup for each name it does not know.
+//   - lookup (one per name being resolved): asks the nameservers over UDP for A and
+//     AAAA records (Config.Resolvers, by default those of /etc/resolv.conf) and
+//     reports to the resolver.
+//
+// An isolate on any shard calls Send. The shard that hosts the sender is busy
+// only with crypto and sockets, so a shard of its own keeps that away from the
 // connection shards.
+//
+// Each notification gets its own connection (Connection: close), so a burst to one
+// push service pays one TLS handshake per notification; there is no connection
+// pool and no HTTP/2. DNS is plain UDP without DNSSEC; a truncated answer is used
+// only if it carries addresses.
 //
 // Delivery is best effort and at most once per Send: a full queue, mailbox or ring
 // drops the notification (a full queue says so in a Result), and a notification
@@ -45,6 +59,7 @@
 // # Not implemented
 //
 // Push receipts (the Prefer: respond-async flow), the old aesgcm content coding
-// and GCM/FCM API keys (every current browser takes aes128gcm with VAPID), and
-// batching or HTTP/2 connection management beyond what net/http does.
+// and GCM/FCM API keys (every current browser takes aes128gcm with VAPID),
+// connection reuse and HTTP/2, DNS over TCP, and TLS 1.2 (push services speak
+// TLS 1.3).
 package webpush

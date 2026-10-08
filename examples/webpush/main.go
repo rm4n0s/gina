@@ -18,7 +18,7 @@
 //	browser ──POST /subscribe──▶ HTTP shard (0..N-1) ──▶ hub isolate ─┐   (shard N)
 //	browser ──POST /notify─────▶ HTTP shard (0..N-1) ──▶ hub isolate  │ webpush.Send per subscriber
 //	                                                       ▲          ▼
-//	                                  TagResult (Gone: forget it)   sender isolate ─▶ worker goroutines ─▶ push service ─▶ browser
+//	                                  TagResult (Gone: forget it)   sender isolate ─▶ delivery isolates ─▶ push service ─▶ browser
 //
 // The hub keeps the subscriptions (in memory, so a restart forgets them: a real
 // application stores them) and shares shard N with the sender.
@@ -83,7 +83,7 @@ func (h *hub) handle(wp *webpush.WebPush, ctx *gina.Ctx, m *gina.Message) gina.E
 		h.drop(func(s sub) bool { return s.s.Endpoint == string(ctx.Data()) })
 	case tagBroadcast:
 		// One Send per subscriber; the payload is encrypted separately for each by the
-		// workers. Results come back to this isolate as TagResult.
+		// delivery isolates. Results come back to this isolate as TagResult.
 		payload := append([]byte(nil), ctx.Data()...)
 		for _, s := range h.subs {
 			wp.Send(ctx, &webpush.Notification{ID: s.id, Sub: s.s, Payload: payload, TTL: time.Hour, Topic: "gina-demo"})
@@ -255,10 +255,6 @@ func main() {
 		os.Exit(1)
 	}
 	defer sys.Close()
-	if err := wp.Start(sys); err != nil {
-		fmt.Fprintln(os.Stderr, "webpush:", err)
-		os.Exit(1)
-	}
 	scheme := "http"
 	if tlsCfg != nil {
 		scheme = "https"

@@ -59,6 +59,9 @@ type fdEntry struct {
 	peerPort uint16   // accepted sockets: the client's address, recorded at accept
 	peerKind uint8    // 0 = none, 4 = IPv4, 6 = IPv6
 	peer     [16]byte // IPv4 uses the first 4 bytes
+
+	connecting bool // a Dial'ed TCP socket whose connect has not been confirmed yet
+	connReady  bool // epoll has reported it writable (or failed) since
 }
 
 type ioOp struct {
@@ -130,7 +133,7 @@ func (r *reactor) poll(timeoutMs int) int {
 			syscall.Read(r.wakefd, b[:])
 			continue
 		}
-		r.onEvent(int(ev.Fd))
+		r.onEvent(int(ev.Fd), ev.Events)
 		handled++
 	}
 	return handled
@@ -193,6 +196,7 @@ func (r *reactor) register(raw int, listener bool) (FDHandle, bool) {
 	r.freeFDs = r.freeFDs[:n-1]
 	e := &r.fds[idx]
 	e.raw, e.used, e.rop, e.wop, e.peerKind = int32(raw), true, -1, -1, 0
+	e.connecting, e.connReady = false, false
 	return FDHandle(uint64(e.gen)<<32 | uint64(idx+1)), true
 }
 
@@ -245,6 +249,63 @@ func (r *reactor) listen(spec ListenSpec) (FDHandle, error) {
 	}
 	return h, nil
 }
+
+// dial makes a non-blocking client socket and starts connecting it. A TCP socket
+// is usually still connecting when this returns; the IOConnect operation waits
+// for it. A UDP socket is connected immediately.
+func (r *reactor) dial(spec DialSpec) (FDHandle, error) {
+	ip := spec.IP.Unmap()
+	if !ip.IsValid() || ip.Zone() != "" || ip.IsUnspecified() || spec.Port == 0 {
+		return 0, syscall.EINVAL
+	}
+	family := syscall.AF_INET
+	if ip.Is6() {
+		family = syscall.AF_INET6
+	}
+	typ := syscall.SOCK_STREAM
+	if spec.UDP {
+		typ = syscall.SOCK_DGRAM
+	}
+	fd, err := syscall.Socket(family, typ|syscall.SOCK_NONBLOCK|syscall.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return 0, err
+	}
+	var sa syscall.Sockaddr
+	if ip.Is6() {
+		sa = &syscall.SockaddrInet6{Port: int(spec.Port), Addr: ip.As16()}
+	} else {
+		sa = &syscall.SockaddrInet4{Port: int(spec.Port), Addr: ip.As4()}
+	}
+	connecting := false
+	switch err := syscall.Connect(fd, sa); err {
+	case nil:
+	case syscall.EINPROGRESS:
+		connecting = true
+	default:
+		syscall.Close(fd)
+		return 0, err
+	}
+	if !spec.UDP {
+		syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
+	}
+	h, ok := r.register(fd, false)
+	if !ok {
+		syscall.Close(fd)
+		return 0, syscall.EMFILE
+	}
+	e := &r.fds[int(uint32(h))-1]
+	e.connecting = connecting
+	e.peerPort = spec.Port
+	if ip.Is6() {
+		e.peerKind, e.peer = 6, ip.As16()
+	} else {
+		e.peerKind = 4
+		copy(e.peer[:], b4(ip))
+	}
+	return h, nil
+}
+
+func b4(ip netip.Addr) []byte { a := ip.As4(); return a[:] }
 
 func (r *reactor) localPort(h FDHandle) uint16 {
 	idx := r.fdIndex(h)
@@ -314,6 +375,8 @@ func ioTag(kind uint8) Tag {
 		return TagIOAccept
 	case ioRecv:
 		return TagIORecv
+	case ioConnect:
+		return TagIOConnect
 	}
 	return TagIOSend
 }
@@ -325,7 +388,7 @@ func (r *reactor) submit(owner Handle, t *isoType, slot uint32, st *ioStage) {
 		return
 	}
 	e := &r.fds[idx]
-	if (st.kind == ioSend && e.wop >= 0) || (st.kind != ioSend && e.rop >= 0) {
+	if (isWriteSide(st.kind) && e.wop >= 0) || (!isWriteSide(st.kind) && e.rop >= 0) {
 		r.deliverDirect(owner, st.kind, -int64(syscall.EBUSY))
 		return
 	}
@@ -348,12 +411,15 @@ func (r *reactor) submit(owner Handle, t *isoType, slot uint32, st *ioStage) {
 		r.finish(oi, res)
 		return
 	}
-	if st.kind == ioSend {
+	if isWriteSide(st.kind) {
 		e.wop = oi
 	} else {
 		e.rop = oi
 	}
 }
+
+// isWriteSide reports whether an operation waits for the socket to become writable.
+func isWriteSide(kind uint8) bool { return kind == ioSend || kind == ioConnect }
 
 // try attempts the operation's syscall; done=false means the socket would block.
 func (r *reactor) try(oi int32, idx int) (res int64, done bool) {
@@ -388,6 +454,20 @@ func (r *reactor) try(oi int32, idx int) (res int64, done bool) {
 				return -int64(errno(err)), true
 			}
 		}
+	case ioConnect:
+		e := &r.fds[idx]
+		if !e.connecting {
+			return 0, true
+		}
+		if !e.connReady {
+			return 0, false
+		}
+		e.connecting = false
+		v, err := syscall.GetsockoptInt(raw, syscall.SOL_SOCKET, syscall.SO_ERROR)
+		if err != nil {
+			return -int64(errno(err)), true
+		}
+		return -int64(v), true
 	case ioRecv:
 		for {
 			n, err := syscall.Read(raw, op.buf)
@@ -427,9 +507,12 @@ func errno(err error) syscall.Errno {
 }
 
 // onEvent retries the operations parked on a socket epoll just reported.
-func (r *reactor) onEvent(idx int) {
+func (r *reactor) onEvent(idx int, events uint32) {
 	if idx < 0 || idx >= len(r.fds) || !r.fds[idx].used {
 		return
+	}
+	if e := &r.fds[idx]; e.connecting && events&uint32(syscall.EPOLLOUT|syscall.EPOLLERR|syscall.EPOLLHUP) != 0 {
+		e.connReady = true
 	}
 	if oi := r.fds[idx].rop; oi >= 0 {
 		if res, done := r.try(oi, idx); done {

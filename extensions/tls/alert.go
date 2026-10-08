@@ -16,6 +16,7 @@ const (
 	alertProtocolVersion       = 70
 	alertInternalError         = 80
 	alertMissingExtension      = 109
+	alertUnsupportedExtension  = 110
 	alertNoApplicationProtocol = 120
 
 	// alertNotTLS is internal: the peer is not speaking TLS, so no alert is sent.

@@ -30,6 +30,7 @@ func newReactor(*Shard, int, int) (*reactor, error)          { return &reactor{}
 func (r *reactor) active() int                               { return 0 }
 func (r *reactor) valid(FDHandle) bool                       { return false }
 func (r *reactor) listen(ListenSpec) (FDHandle, error)       { return 0, errNoIO }
+func (r *reactor) dial(DialSpec) (FDHandle, error)           { return 0, errNoIO }
 func (r *reactor) localPort(FDHandle) uint16                 { return 0 }
 func (r *reactor) peerAddr(FDHandle) (netip.AddrPort, bool)  { return netip.AddrPort{}, false }
 func (r *reactor) closeFD(FDHandle)                          {}

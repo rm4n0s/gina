@@ -19,6 +19,7 @@ const (
 	ioAccept uint8 = iota + 1
 	ioRecv
 	ioSend
+	ioConnect
 )
 
 func (c *Ctx) stage(kind uint8, fd FDHandle, buf []byte, timeout time.Duration) SubmitResult {
@@ -51,12 +52,40 @@ func (c *Ctx) IOSend(fd FDHandle, buf []byte, timeout time.Duration) SubmitResul
 	return c.stage(ioSend, fd, buf, timeout)
 }
 
+// IOConnect stages the wait for a socket made by Dial to finish connecting. The
+// completion (TagIOConnect) carries 0 on success or -errno (-ECONNREFUSED,
+// -ETIMEDOUT, ...). Do not send or receive on a TCP socket before it arrives. It
+// completes at once for a UDP socket or one that is already connected.
+func (c *Ctx) IOConnect(fd FDHandle, timeout time.Duration) SubmitResult {
+	return c.stage(ioConnect, fd, nil, timeout)
+}
+
 // Listen creates a listening socket owned by this isolate (closed when it dies).
 func (c *Ctx) Listen(spec ListenSpec) (FDHandle, error) {
 	if c.t.ownfd[c.slot] != 0 {
 		return 0, errAlreadyOwns
 	}
 	fd, err := c.s.io.listen(spec)
+	if err != nil {
+		return 0, err
+	}
+	c.t.ownfd[c.slot] = fd
+	return fd, nil
+}
+
+// Dial starts an outbound connection from this isolate and returns its socket,
+// which the isolate owns (closed when it dies or calls CloseFD). A TCP connect is
+// asynchronous: stage IOConnect and wait for it before using the socket. A UDP
+// socket is connected at once, and IOSend and IORecv then carry one datagram per
+// operation. Like Listen it takes the isolate's one socket slot.
+//
+// Dial does not decide where an isolate may connect: an application that dials
+// addresses chosen by others must refuse the ones it does not want to reach.
+func (c *Ctx) Dial(spec DialSpec) (FDHandle, error) {
+	if c.t.ownfd[c.slot] != 0 {
+		return 0, errAlreadyOwns
+	}
+	fd, err := c.s.io.dial(spec)
 	if err != nil {
 		return 0, err
 	}
@@ -75,8 +104,8 @@ func (c *Ctx) CloseFD(fd FDHandle) {
 	c.s.io.closeFD(fd)
 }
 
-// PeerAddr returns the client address of a socket this shard accepted, recorded
-// at accept time (no syscall). IPv4-mapped IPv6 addresses are reported as IPv4.
+// PeerAddr returns the remote address of a socket this shard accepted or dialled,
+// recorded when it was made (no syscall). IPv4-mapped IPv6 addresses are reported as IPv4.
 // ok is false for listeners, stale handles and sockets not made by accept.
 func (c *Ctx) PeerAddr(fd FDHandle) (netip.AddrPort, bool) { return c.s.io.peerAddr(fd) }
 

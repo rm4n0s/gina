@@ -223,10 +223,30 @@ func (w *WebPush) SendExternal(sys *gina.System, n *Notification) gina.SendResul
 
 // ---- the sender isolate ----
 
-type sender struct{ accepted uint64 }
+// job is a notification accepted by the sender and handed to a delivery isolate.
+type job struct {
+	n        Notification
+	ttl      int64  // seconds
+	auth     string // the VAPID Authorization header
+	reply    gina.Handle
+	reported bool // a delivery sent the Result
+}
 
-func (w *WebPush) senderInit(_ *sender, g *gina.Ctx, _ []byte) gina.Effect {
-	w.t.setSender(g.Self()) // after a restart the handle has a new generation
+type token struct {
+	header  string
+	renewAt time.Time
+}
+
+type sender struct {
+	queue   []*job               // accepted, waiting for a free delivery
+	running map[gina.Handle]*job // delivery isolate -> its notification
+	tokens  map[string]token     // VAPID Authorization header per push service origin
+}
+
+func (w *WebPush) senderInit(s *sender, g *gina.Ctx, _ []byte) gina.Effect {
+	s.running = map[gina.Handle]*job{}
+	s.tokens = map[string]token{}
+	w.sender.Store(uint64(g.Self())) // after a restart the handle has a new generation
 	return gina.WaitMessage()
 }
 
@@ -244,19 +264,78 @@ func (w *WebPush) senderHandler(s *sender, g *gina.Ctx, m *gina.Message) gina.Ef
 		if reply == 0 {
 			reply = m.Source
 		}
+		j := &job{n: n, ttl: w.ttl(ttl), reply: reply}
+		if err == nil {
+			j.auth, err = s.authorization(w, n.Sub.Endpoint)
+		}
 		switch {
 		case err != nil:
 			w.reply(g, reply, Result{ID: n.ID, Outcome: OutcomeInvalid})
-		case !w.t.submit(&job{n: n, ttl: w.ttl(ttl), reply: reply}):
-			w.reply(g, reply, Result{ID: n.ID, Outcome: OutcomeOverloaded})
+		case len(s.running) < w.cfg.Workers && s.start(w, g, j):
+		case len(s.queue) < w.cfg.Queue:
+			s.queue = append(s.queue, j)
 		default:
-			s.accepted++
+			w.reply(g, reply, Result{ID: n.ID, Outcome: OutcomeOverloaded})
+		}
+	case gina.TagChildExit:
+		ce := gina.PayloadAs[gina.ChildExit](m)
+		if j := s.running[ce.Old]; j != nil {
+			delete(s.running, ce.Old)
+			if !j.reported { // the delivery crashed before it could say how it went
+				w.reply(g, j.reply, Result{ID: j.n.ID, Outcome: OutcomeFailed})
+			}
+		}
+		for len(s.queue) > 0 && len(s.running) < w.cfg.Workers {
+			j := s.queue[0]
+			if !s.start(w, g, j) {
+				break
+			}
+			s.queue = s.queue[1:]
 		}
 	case gina.TagShutdown:
-		w.t.close()
 		return gina.Done()
 	}
 	return gina.WaitMessage()
+}
+
+// start gives j to a new delivery isolate. False means there is no room for one.
+func (s *sender) start(w *WebPush, g *gina.Ctx, j *job) bool {
+	h, err := g.Spawn(gina.SpawnSpec{Type: w.cfg.TypeID + typeDeliveryOffset, Group: gina.GroupNone, Restart: gina.RestartTemporary})
+	if err != gina.SpawnErrNone {
+		return false
+	}
+	if g.SendAttach(h, tagStart, nil, j) != gina.SendOK {
+		// Cannot happen with an empty mailbox; if it does the delivery would wait for
+		// a job that never comes, so it is told to stop and the notification failed.
+		g.SendRaw(h, gina.TagShutdown, nil)
+		w.reply(g, j.reply, Result{ID: j.n.ID, Outcome: OutcomeFailed})
+		return true
+	}
+	s.running[h] = j
+	return true
+}
+
+// authorization returns the VAPID header for the endpoint's origin, signing a new
+// token only about twice a day per push service (the token is valid for a service,
+// not a subscription).
+func (s *sender) authorization(w *WebPush, endpoint string) (string, error) {
+	aud, err := audience(endpoint)
+	if err != nil {
+		return "", err
+	}
+	now := time.Now()
+	if tk, ok := s.tokens[aud]; ok && now.Before(tk.renewAt) {
+		return tk.header, nil
+	}
+	h, err := w.cfg.VAPID.authorization(endpoint, w.cfg.Subject, now.Add(12*time.Hour))
+	if err != nil {
+		return "", err
+	}
+	if len(s.tokens) >= 64 { // subscribers choose endpoints: do not let them grow this without bound
+		clear(s.tokens)
+	}
+	s.tokens[aud] = token{h, now.Add(11 * time.Hour)}
+	return h, nil
 }
 
 func (w *WebPush) reply(g *gina.Ctx, to gina.Handle, r Result) {
