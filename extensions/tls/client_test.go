@@ -273,9 +273,21 @@ func TestClientAgainstGoServerRefusals(t *testing.T) {
 			t.Fatal("TLS 1.2 server accepted")
 		}
 	})
-	t.Run("no common group", func(t *testing.T) {
-		// We offer only X25519; a server that will only do P-256 refuses.
+	t.Run("p256 only", func(t *testing.T) {
+		// We send key shares for X25519 and P-256, so a server that only does P-256
+		// (PostgreSQL's default up to version 17) needs no HelloRetryRequest.
 		nc, done := goServer(t, &ctls.Config{Certificates: []ctls.Certificate{cert}, MinVersion: ctls.VersionTLS13, CurvePreferences: []ctls.CurveID{ctls.CurveP256}})
+		cli := clientFor(t, "go.example", rootsFor(t, cert))
+		got, err := drive(t, cli, nc, []byte("hello"), len(":hello"))
+		nc.Close()
+		<-done
+		if err != nil || got != ":hello" {
+			t.Fatalf("got %q err %v", got, err)
+		}
+	})
+	t.Run("no common group", func(t *testing.T) {
+		// A server that will only do P-384 refuses: HelloRetryRequest would not help.
+		nc, done := goServer(t, &ctls.Config{Certificates: []ctls.Certificate{cert}, MinVersion: ctls.VersionTLS13, CurvePreferences: []ctls.CurveID{ctls.CurveP384}})
 		cli := clientFor(t, "go.example", rootsFor(t, cert))
 		_, err := drive(t, cli, nc, []byte("x"), 1)
 		nc.Close()

@@ -5,7 +5,7 @@ package tls
 // machine over bytes that never blocks. NewClient puts the ClientHello in
 // Outgoing; Feed consumes the server's flight and queues our Finished.
 //
-// What it does: TLS 1.3, AES-128/256-GCM, X25519 key exchange, server
+// What it does: TLS 1.3, AES-128/256-GCM, X25519 or P-256 key exchange (a key share for each), server
 // certificates chained to ClientConfig.RootCAs and checked against ServerName
 // (ECDSA, Ed25519 and RSA-PSS signatures), ALPN, KeyUpdate. What it does not:
 // HelloRetryRequest (it offers the one share every TLS 1.3 server accepts),
@@ -49,14 +49,14 @@ type ClientConfig struct {
 }
 
 type clientState struct {
-	cfg        ClientConfig
-	priv       *ecdh.PrivateKey
-	sessionID  []byte
-	hello      []byte // our ClientHello message, written to the transcript once the suite is known
-	hsSecret   []byte
-	cHS, sHS   []byte
-	leaf       *x509.Certificate
-	transcript hash.Hash
+	cfg          ClientConfig
+	privX, privP *ecdh.PrivateKey // one key share per group offered
+	sessionID    []byte
+	hello        []byte // our ClientHello message, written to the transcript once the suite is known
+	hsSecret     []byte
+	cHS, sHS     []byte
+	leaf         *x509.Certificate
+	transcript   hash.Hash
 }
 
 var sigAlgsOffered = []uint16{sigECDSAP256, sigECDSAP384, sigECDSAP521, sigEd25519, sigPSSSHA256, sigPSSSHA384, sigPSSSHA512}
@@ -92,11 +92,18 @@ func NewClient(cfg *ClientConfig) (*Conn, error) {
 	if cc.Now == nil {
 		cc.Now = time.Now
 	}
-	priv, err := ecdh.X25519().GenerateKey(rand.Reader)
+	// Two key shares, so that a server that supports only one of the groups (OpenSSL
+	// servers configured for P-256 only, PostgreSQL's default up to version 17) needs no
+	// HelloRetryRequest.
+	privX, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, err
 	}
-	cs := &clientState{cfg: cc, priv: priv, sessionID: make([]byte, 32)}
+	privP, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	cs := &clientState{cfg: cc, privX: privX, privP: privP, sessionID: make([]byte, 32)}
 	if _, err := rand.Read(cs.sessionID); err != nil {
 		return nil, err
 	}
@@ -125,9 +132,10 @@ func NewClient(cfg *ClientConfig) (*Conn, error) {
 		ch.bytes([]byte(cc.ServerName))
 	}
 	ch.u16(extSupportedGroups)
+	ch.u16(2 + 4)
 	ch.u16(4)
-	ch.u16(2)
 	ch.u16(groupX25519)
+	ch.u16(groupP256)
 	ch.u16(extSigAlgs)
 	ch.u16(2 + 2*len(sigAlgsOffered))
 	ch.u16(2 * len(sigAlgsOffered))
@@ -146,13 +154,16 @@ func NewClient(cfg *ClientConfig) (*Conn, error) {
 	ch.u16(3)
 	ch.u8(2)
 	ch.u16(0x0304)
-	pub := priv.PublicKey().Bytes()
+	pubX, pubP := privX.PublicKey().Bytes(), privP.PublicKey().Bytes()
 	ch.u16(extKeyShare)
-	ch.u16(2 + 4 + len(pub))
-	ch.u16(4 + len(pub))
+	ch.u16(2 + 4 + len(pubX) + 4 + len(pubP))
+	ch.u16(4 + len(pubX) + 4 + len(pubP))
 	ch.u16(groupX25519)
-	ch.u16(len(pub))
-	ch.bytes(pub)
+	ch.u16(len(pubX))
+	ch.bytes(pubX)
+	ch.u16(groupP256)
+	ch.u16(len(pubP))
+	ch.bytes(pubP)
 	if len(cc.NextProtos) > 0 {
 		n := 0
 		for _, p := range cc.NextProtos {
@@ -223,6 +234,7 @@ func (c *Conn) onServerHello(msg []byte) error {
 	c.suite = findSuite(uint16(suiteID))
 
 	var share []byte
+	group := 0
 	version := 0
 	er := &reader{b: exts}
 	seen := map[int]bool{}
@@ -249,9 +261,10 @@ func (c *Conn) onServerHello(msg []byte) error {
 			if dr.bad || len(dr.b) != 0 {
 				return bad()
 			}
-			if g != groupX25519 {
+			if g != groupX25519 && g != groupP256 {
 				return alert(alertIllegalParameter, "server chose a key exchange group we did not offer")
 			}
+			group = g
 		default:
 			return alert(alertUnsupportedExtension, "unexpected extension in ServerHello")
 		}
@@ -265,11 +278,15 @@ func (c *Conn) onServerHello(msg []byte) error {
 	if len(c.hsBuf) != 0 {
 		return alert(alertUnexpectedMessage, "data after ServerHello in its record")
 	}
-	peer, err := ecdh.X25519().NewPublicKey(share)
+	curve, priv := ecdh.X25519(), cs.privX
+	if group == groupP256 {
+		curve, priv = ecdh.P256(), cs.privP
+	}
+	peer, err := curve.NewPublicKey(share)
 	if err != nil {
 		return alert(alertIllegalParameter, "invalid key_share")
 	}
-	shared, err := cs.priv.ECDH(peer)
+	shared, err := priv.ECDH(peer)
 	if err != nil {
 		return alert(alertIllegalParameter, "key exchange failed")
 	}
@@ -291,7 +308,7 @@ func (c *Conn) onServerHello(msg []byte) error {
 	if c.wr, err = newRecCipher(c.suite, cs.cHS); err != nil {
 		return alert(alertInternalError, err.Error())
 	}
-	cs.priv, cs.hello = nil, nil
+	cs.privX, cs.privP, cs.hello = nil, nil, nil
 	c.st = stWaitEncryptedExtensions
 	return nil
 }

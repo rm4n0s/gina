@@ -14,7 +14,7 @@
 // session resumption/tickets, 0-RTT, client certificates.
 //
 // NewServer makes the server side; NewClient (client.go) the client side, which
-// offers X25519 only and verifies the server's chain with crypto/x509 against
+// offers X25519 and P-256 key shares and verifies the server's chain with crypto/x509 against
 // ClientConfig.RootCAs and the name in ClientConfig.ServerName. Both are a Conn
 // with the same data plane.
 package tls

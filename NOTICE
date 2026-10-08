@@ -1,0 +1,107 @@
+Gina
+Copyright (c) 2026 Manos Ragiadakos
+Licensed under the MIT License (see LICENSE).
+
+This file lists third-party work that Gina is built on, links against, or follows
+the design of, with the licenses that go with it. It says plainly what was and was
+not copied.
+
+
+1. github.com/mattn/go-sqlite3 (MIT) -- linked in, not copied
+
+   extensions/sql imports it (sqlite_cgo.go) to open SQLite databases. It is a
+   dependency in go.mod, not vendored, and a binary built with cgo contains it.
+   Its source is not copied into this repository. Its license, which requires
+   this notice to accompany copies of it, is:
+
+--------------------------------------------------------------------------------
+The MIT License (MIT)
+
+Copyright (c) 2014 Yasuhiro Matsumoto
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+--------------------------------------------------------------------------------
+
+
+2. SQLite (public domain) -- inside go-sqlite3
+
+   go-sqlite3 carries the SQLite amalgamation (sqlite3-binding.c). SQLite's
+   authors have dedicated it to the public domain
+   (https://www.sqlite.org/copyright.html). No notice is required; it is
+   mentioned because it is part of what a cgo build of Gina contains.
+
+
+3. Go standard library, database/sql (BSD 3-Clause) -- API shape only
+
+   extensions/sql follows the shape of database/sql (a pool of connections,
+   statements, transactions, rows with Next and Scan), and imports the package
+   database/sql/driver for its interface and value types. No source code of
+   database/sql was copied or translated: the pool, the protocol and the
+   conversions are written for Gina's isolates. The Go license is reproduced here
+   because the design is acknowledged and the driver package is imported:
+
+--------------------------------------------------------------------------------
+Copyright 2009 The Go Authors.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+   * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+   * Neither the name of Google LLC nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+--------------------------------------------------------------------------------
+
+
+4. Tina (Apache License 2.0) -- design followed, no source copied
+
+   Gina is a Go port of the concurrency model of pmbanugo/tina
+   (https://github.com/pmbanugo/tina): thread-per-core shards, isolates, effects,
+   fixed-size messages, SPSC rings, supervision. SPEC.md records that it was
+   reimplemented from the documented behaviour. No Tina source is copied. If any
+   is, Tina's Apache-2.0 license and NOTICE must be added here and the changes
+   marked.
+
+
+5. Specifications
+
+   The protocols are implemented from their specifications: PostgreSQL's
+   frontend/backend protocol, TLS 1.3 (RFC 8446), HTTP/1.1 and HTTP/2 (RFC 9112,
+   9113), HPACK (RFC 7541, whose Appendix B Huffman table generated
+   extensions/http2/huffman_table.go), WebSocket (RFC 6455, 8441), Web Push
+   (RFC 8030, 8291, 8292) and SCRAM (RFC 5802, 7677). No specification text or
+   third-party implementation is included.
